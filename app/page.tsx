@@ -28,22 +28,6 @@ function createDefaultRules(result: AnalysisResult): ManualReviewConfig {
   };
 }
 
-function appendClientDebugLog(payload: {
-  hypothesisId: string;
-  location: string;
-  message: string;
-  data: Record<string, unknown>;
-  timestamp: number;
-}) {
-  // #region agent log
-  void fetch("/api/debug-log", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  }).catch(() => {});
-  // #endregion
-}
-
 export default function HomePage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [quickMode, setQuickMode] = useState(true);
@@ -63,23 +47,6 @@ export default function HomePage() {
     }
     return `${selectedFile.name} · ${(selectedFile.size / 1024).toFixed(1)} KB`;
   }, [selectedFile]);
-
-  useEffect(() => {
-    // #region agent log
-    appendClientDebugLog({
-      hypothesisId: "A",
-      location: "app/page.tsx:state-effect",
-      message: "State snapshot updated",
-      data: {
-        hasSelectedFile: Boolean(selectedFile),
-        selectedFileSize: selectedFile?.size ?? null,
-        loading,
-        derivedDisabled: !selectedFile || loading,
-      },
-      timestamp: Date.now(),
-    });
-    // #endregion
-  }, [selectedFile, loading]);
 
   useEffect(() => {
     async function loadSampleFiles() {
@@ -143,29 +110,7 @@ export default function HomePage() {
   }
 
   async function runAnalysis(mode: "quick" | "reviewed", reviewRules?: ManualReviewConfig) {
-    // #region agent log
-    appendClientDebugLog({
-      hypothesisId: "C",
-      location: "app/page.tsx:runAnalysis-entry",
-      message: "runAnalysis invoked",
-      data: {
-        mode,
-        hasSelectedFile: Boolean(selectedFile),
-        loading,
-      },
-      timestamp: Date.now(),
-    });
-    // #endregion
     if (!selectedFile) {
-      // #region agent log
-      appendClientDebugLog({
-        hypothesisId: "C",
-        location: "app/page.tsx:runAnalysis-no-file-branch",
-        message: "runAnalysis exited without selected file",
-        data: { mode, loading },
-        timestamp: Date.now(),
-      });
-      // #endregion
       setError("Selecione um arquivo antes de iniciar a analise.");
       return;
     }
@@ -173,20 +118,6 @@ export default function HomePage() {
     setError(null);
     try {
       const fileBase64 = await fileToBase64(selectedFile);
-      // #region agent log
-      appendClientDebugLog({
-        hypothesisId: "C",
-        location: "app/page.tsx:runAnalysis-before-fetch",
-        message: "Prepared payload for /api/analyze",
-        data: {
-          mode,
-          fileSize: selectedFile.size,
-          fileType: selectedFile.type || "unknown",
-          base64Length: fileBase64.length,
-        },
-        timestamp: Date.now(),
-      });
-      // #endregion
       const payload = {
         fileName: selectedFile.name,
         fileBase64,
@@ -266,20 +197,8 @@ export default function HomePage() {
           onChange={(event) => {
             const files = event.currentTarget.files;
             const file = files?.[0] ?? null;
-            // #region agent log
-            appendClientDebugLog({
-              hypothesisId: "B",
-              location: "app/page.tsx:file-input-onChange",
-              message: "File input changed",
-              data: {
-                fileCount: files?.length ?? 0,
-                selectedFileSize: file?.size ?? null,
-                selectedFileType: file?.type ?? "none",
-              },
-              timestamp: Date.now(),
-            });
-            // #endregion
             if (!file) {
+              setSelectedFile(null);
               setError(
                 "Nenhum arquivo foi selecionado. Se estiver em ambiente remoto, escolha um arquivo local do computador ou use o carregamento de exemplo.",
               );
@@ -351,28 +270,9 @@ export default function HomePage() {
           <button
             type="button"
             className="btn"
-            onClick={() => {
-              const mode = quickMode ? "quick" : "reviewed";
-              const derivedDisabled = !selectedFile || loading;
-              // #region agent log
-              appendClientDebugLog({
-                hypothesisId: "D",
-                location: "app/page.tsx:process-button-onClick",
-                message: "Process button click received",
-                data: {
-                  mode,
-                  hasSelectedFile: Boolean(selectedFile),
-                  loading,
-                  derivedDisabled,
-                },
-                timestamp: Date.now(),
-              });
-              // #endregion
-              if (derivedDisabled) {
-                return;
-              }
-              void runAnalysis(mode, quickMode ? undefined : rules ?? undefined);
-            }}
+            onClick={() =>
+              void runAnalysis(quickMode ? "quick" : "reviewed", quickMode ? undefined : rules ?? undefined)
+            }
             disabled={!selectedFile || loading}
           >
             {loading ? "Processando..." : "Processar arquivo"}

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { runAnalysisPipeline } from "@/lib/pipeline";
-import { appendDebugLog } from "@/lib/debugLog";
 
 export const runtime = "nodejs";
 
@@ -45,20 +44,6 @@ export async function POST(request: Request) {
   try {
     const raw = await request.json();
     const payload = requestSchema.parse(raw);
-    // #region agent log
-    appendDebugLog({
-      hypothesisId: "E",
-      location: "app/api/analyze/route.ts:POST-entry",
-      message: "Analyze API received payload",
-      data: {
-        mode: payload.mode,
-        fileName: payload.fileName,
-        hasRules: Boolean(payload.rules),
-        base64Length: payload.fileBase64.length,
-      },
-      timestamp: Date.now(),
-    });
-    // #endregion
     const fileBuffer = Buffer.from(payload.fileBase64, "base64");
     const result = runAnalysisPipeline(
       payload.fileName,

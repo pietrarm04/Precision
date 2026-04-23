@@ -2,7 +2,6 @@ import { readFile, readdir } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { appendDebugLog } from "@/lib/debugLog";
 
 export const runtime = "nodejs";
 
@@ -25,16 +24,6 @@ export async function GET(request: Request) {
       }
       const filePath = join(process.cwd(), "samples", safeName);
       const buffer = await readFile(filePath);
-      appendDebugLog({
-        hypothesisId: "F",
-        location: "app/api/sample-files/route.ts:GET-file-success",
-        message: "Sample file loaded for browser-restricted environment",
-        data: {
-          safeName,
-          bytes: buffer.byteLength,
-        },
-        timestamp: Date.now(),
-      });
       return NextResponse.json({
         fileName: safeName,
         mimeType:
@@ -51,22 +40,8 @@ export async function GET(request: Request) {
       .map((entry) => entry.name)
       .filter((name) => ALLOWED_EXTENSIONS.has(extname(name).toLowerCase()))
       .sort((a, b) => a.localeCompare(b));
-    appendDebugLog({
-      hypothesisId: "F",
-      location: "app/api/sample-files/route.ts:GET-success",
-      message: "Sample file list loaded",
-      data: { count: sampleFiles.length },
-      timestamp: Date.now(),
-    });
     return NextResponse.json({ files: sampleFiles });
-  } catch (error) {
-    appendDebugLog({
-      hypothesisId: "F",
-      location: "app/api/sample-files/route.ts:GET-error",
-      message: "Failed to list sample files",
-      data: { error: error instanceof Error ? error.message : "unknown" },
-      timestamp: Date.now(),
-    });
+  } catch {
     if (requestedName) {
       return NextResponse.json({ message: "Nao foi possivel carregar o arquivo de exemplo." }, { status: 404 });
     }
