@@ -5,6 +5,13 @@ import { RuleReviewPanel } from "@/components/RuleReviewPanel";
 import { ResultsView } from "@/components/ResultsView";
 import { AnalysisResult, ManualQuestionOverride, ManualReviewConfig } from "@/lib/types";
 
+const DEFAULT_SAMPLE_FILES = ["inspection_messy_safetyculture_like.csv", "sales_simple.csv"];
+type ServerSamplePayload = {
+  fileName: string;
+  fileBase64: string;
+  byteSize: number;
+};
+
 async function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -30,6 +37,7 @@ function createDefaultRules(result: AnalysisResult): ManualReviewConfig {
 
 export default function HomePage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [serverSample, setServerSample] = useState<ServerSamplePayload | null>(null);
   const [quickMode, setQuickMode] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,16 +45,29 @@ export default function HomePage() {
   const [rules, setRules] = useState<ManualReviewConfig | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryText, setSummaryText] = useState<string | null>(null);
-  const [sampleFiles, setSampleFiles] = useState<string[]>([]);
-  const [selectedSample, setSelectedSample] = useState<string>("");
+  const [sampleFiles, setSampleFiles] = useState<string[]>(DEFAULT_SAMPLE_FILES);
+  const [selectedSample, setSelectedSample] = useState<string>(DEFAULT_SAMPLE_FILES[0] ?? "");
   const [sampleLoading, setSampleLoading] = useState(false);
 
+  const hasAnalysisInput = Boolean(selectedFile || serverSample);
+
   const fileInfo = useMemo(() => {
-    if (!selectedFile) {
-      return null;
+    if (selectedFile) {
+      return `${selectedFile.name} · ${(selectedFile.size / 1024).toFixed(1)} KB`;
     }
-    return `${selectedFile.name} · ${(selectedFile.size / 1024).toFixed(1)} KB`;
-  }, [selectedFile]);
+    if (serverSample) {
+      return `${serverSample.fileName} · ${(serverSample.byteSize / 1024).toFixed(1)} KB (exemplo do servidor)`;
+    }
+    return null;
+  }, [selectedFile, serverSample]);
+
+  function getBase64ByteSize(base64: string): number {
+    if (!base64) {
+      return 0;
+    }
+    const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+    return Math.floor((base64.length * 3) / 4) - padding;
+  }
 
   useEffect(() => {
     async function loadSampleFiles() {
@@ -57,9 +78,9 @@ export default function HomePage() {
         }
         const data = (await response.json()) as { files?: string[] };
         const files = data.files ?? [];
-        setSampleFiles(files);
         if (files.length > 0) {
-          setSelectedSample(files[0]);
+          setSampleFiles(files);
+          setSelectedSample((current) => (files.includes(current) ? current : files[0]));
         }
       } catch {
         // Intencionalmente silencioso: o uploader local continua funcionando.
@@ -68,24 +89,16 @@ export default function HomePage() {
     void loadSampleFiles();
   }, []);
 
-  function decodeBase64(base64: string): ArrayBuffer {
-    const binary = atob(base64);
-    const buffer = new ArrayBuffer(binary.length);
-    const bytes = new Uint8Array(buffer);
-    for (let i = 0; i < binary.length; i += 1) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return buffer;
-  }
-
   async function loadSampleFile() {
-    if (!selectedSample) {
+    const sampleToLoad = selectedSample || sampleFiles[0] || "";
+    if (!sampleToLoad) {
+      setError("Nenhum arquivo de exemplo disponivel.");
       return;
     }
     setSampleLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/sample-files?name=${encodeURIComponent(selectedSample)}`);
+      const response = await fetch(`/api/sample-files?name=${encodeURIComponent(sampleToLoad)}`);
       const data = (await response.json()) as {
         fileName?: string;
         fileBase64?: string;
@@ -95,10 +108,12 @@ export default function HomePage() {
       if (!response.ok || !data.fileName || !data.fileBase64) {
         throw new Error(data.message ?? "Falha ao carregar arquivo de exemplo.");
       }
-      const file = new File([decodeBase64(data.fileBase64)], data.fileName, {
-        type: data.mimeType ?? "application/octet-stream",
+      setServerSample({
+        fileName: data.fileName,
+        fileBase64: data.fileBase64,
+        byteSize: getBase64ByteSize(data.fileBase64),
       });
-      setSelectedFile(file);
+      setSelectedFile(null);
       setResult(null);
       setRules(null);
       setSummaryText(null);
@@ -110,17 +125,21 @@ export default function HomePage() {
   }
 
   async function runAnalysis(mode: "quick" | "reviewed", reviewRules?: ManualReviewConfig) {
-    if (!selectedFile) {
+    if (!selectedFile && !serverSample) {
       setError("Selecione um arquivo antes de iniciar a analise.");
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const fileBase64 = await fileToBase64(selectedFile);
+      const payloadFileName = selectedFile?.name ?? serverSample?.fileName;
+      const payloadFileBase64 = selectedFile ? await fileToBase64(selectedFile) : serverSample?.fileBase64;
+      if (!payloadFileName || !payloadFileBase64) {
+        throw new Error("Nao foi possivel preparar o arquivo para analise.");
+      }
       const payload = {
-        fileName: selectedFile.name,
-        fileBase64,
+        fileName: payloadFileName,
+        fileBase64: payloadFileBase64,
         mode,
         rules: reviewRules,
       };
@@ -198,13 +217,13 @@ export default function HomePage() {
             const files = event.currentTarget.files;
             const file = files?.[0] ?? null;
             if (!file) {
-              setSelectedFile(null);
               setError(
                 "Nenhum arquivo foi selecionado. Se estiver em ambiente remoto, escolha um arquivo local do computador ou use o carregamento de exemplo.",
               );
               return;
             }
             setSelectedFile(file);
+            setServerSample(null);
             setResult(null);
             setRules(null);
             setSummaryText(null);
@@ -215,34 +234,32 @@ export default function HomePage() {
           Se o seletor de arquivos nao conseguir abrir caminhos como <code>/workspace/... </code>, use
           um arquivo local do navegador ou o carregador de exemplos abaixo.
         </p>
-        {sampleFiles.length > 0 && (
-          <div className="card" style={{ padding: 12 }}>
-            <div style={{ display: "grid", gap: 8 }}>
-              <strong>Carregar arquivo de exemplo do servidor</strong>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <select
-                  value={selectedSample}
-                  onChange={(event) => setSelectedSample(event.target.value)}
-                  style={{ minWidth: 240, width: "auto", flex: "1 1 240px" }}
-                >
-                  {sampleFiles.map((sampleFile) => (
-                    <option key={sampleFile} value={sampleFile}>
-                      {sampleFile}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="btn secondary"
-                  onClick={() => void loadSampleFile()}
-                  disabled={sampleLoading || loading}
-                >
-                  {sampleLoading ? "Carregando exemplo..." : "Carregar exemplo"}
-                </button>
-              </div>
+        <div className="card" style={{ padding: 12 }}>
+          <div style={{ display: "grid", gap: 8 }}>
+            <strong>Carregar arquivo de exemplo do servidor</strong>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <select
+                value={selectedSample}
+                onChange={(event) => setSelectedSample(event.target.value)}
+                style={{ minWidth: 240, width: "auto", flex: "1 1 240px" }}
+              >
+                {sampleFiles.map((sampleFile) => (
+                  <option key={sampleFile} value={sampleFile}>
+                    {sampleFile}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() => void loadSampleFile()}
+                disabled={sampleFiles.length === 0 || sampleLoading || loading}
+              >
+                {sampleLoading ? "Carregando exemplo..." : "Carregar exemplo"}
+              </button>
             </div>
           </div>
-        )}
+        </div>
         {fileInfo && <div style={{ color: "var(--muted)" }}>{fileInfo}</div>}
         <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <label className="card" style={{ padding: 12 }}>
@@ -273,7 +290,7 @@ export default function HomePage() {
             onClick={() =>
               void runAnalysis(quickMode ? "quick" : "reviewed", quickMode ? undefined : rules ?? undefined)
             }
-            disabled={!selectedFile || loading}
+            disabled={!hasAnalysisInput || loading}
           >
             {loading ? "Processando..." : "Processar arquivo"}
           </button>
