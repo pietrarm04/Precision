@@ -974,6 +974,12 @@ export function analyzeDataset(
     datasetTypeConfidence: confidenceFromScore(inference.confidence),
     rowCount: normalized.rows.length,
     columnCount: normalized.headers.length,
+    detectedColumns: normalized.headers,
+    parsingDiagnostics: {
+      partial: parsed.errors.length > 0 || parsed.warnings.length > 0,
+      warnings: parsed.warnings,
+      errors: parsed.errors,
+    },
     structuralQuality: {
       score: structure.score,
       label: structure.label,
@@ -1027,7 +1033,7 @@ export function analyzeDataset(
         : undefined,
     transparency: {
       normalizationActions: normalized.normalizationNotes,
-      parsingWarnings: parsed.warnings,
+      parsingWarnings: [...parsed.warnings, ...parsed.errors],
       appliedRules,
     },
     normalizedRowsForExport: normalized.rows,

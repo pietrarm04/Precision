@@ -18,6 +18,7 @@ export interface ParsedTabularFile {
   headers: string[];
   rows: RowMap[];
   warnings: string[];
+  errors: string[];
 }
 
 export interface NormalizedDataset {
@@ -114,6 +115,12 @@ export interface AnalysisResult {
   datasetTypeConfidence: number;
   rowCount: number;
   columnCount: number;
+  detectedColumns: string[];
+  parsingDiagnostics: {
+    partial: boolean;
+    warnings: string[];
+    errors: string[];
+  };
   structuralQuality: {
     score: number;
     label: "limpo" | "intermediario" | "baguncado";

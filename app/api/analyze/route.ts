@@ -40,17 +40,45 @@ const requestSchema = z.object({
   rules: reviewSchema.optional(),
 });
 
+function toArrayBuffer(buffer: Buffer): ArrayBuffer {
+  return buffer.buffer.slice(
+    buffer.byteOffset,
+    buffer.byteOffset + buffer.byteLength,
+  ) as ArrayBuffer;
+}
+
+function isSupportedExtension(fileName: string): boolean {
+  return /\.(csv|xlsx|xls)$/i.test(fileName);
+}
+
 export async function POST(request: Request) {
   try {
     const raw = await request.json();
     const payload = requestSchema.parse(raw);
+    if (!isSupportedExtension(payload.fileName)) {
+      return NextResponse.json(
+        {
+          message: "Formato nao suportado. Envie CSV, XLSX ou XLS.",
+          supportedFormats: ["csv", "xlsx", "xls"],
+        },
+        { status: 400 },
+      );
+    }
+
     const fileBuffer = Buffer.from(payload.fileBase64, "base64");
+    if (fileBuffer.byteLength === 0) {
+      return NextResponse.json(
+        {
+          message: "Arquivo recebido vazio apos decodificacao base64.",
+          supportedFormats: ["csv", "xlsx", "xls"],
+        },
+        { status: 400 },
+      );
+    }
+
     const result = runAnalysisPipeline(
       payload.fileName,
-      fileBuffer.buffer.slice(
-        fileBuffer.byteOffset,
-        fileBuffer.byteOffset + fileBuffer.byteLength,
-      ) as ArrayBuffer,
+      toArrayBuffer(fileBuffer),
       {
         mode: payload.mode,
         rules: payload.rules,
