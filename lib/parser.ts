@@ -6,12 +6,35 @@ import { normalizeHeader, toStringValue } from "@/lib/utils";
 const MAX_ROWS = 50_000;
 const HEADER_SCAN_LIMIT = 18;
 
-function matrixFromCsv(buffer: Buffer): string[][] {
+function matrixFromCsv(buffer: Buffer): { matrix: string[][]; warnings: string[]; errors: string[] } {
   const csv = buffer.toString("utf-8");
-  const parsed = Papa.parse<string[]>(csv, {
+  const parsed: Papa.ParseResult<string[]> = Papa.parse<string[]>(csv, {
     skipEmptyLines: false,
+    delimiter: "",
+    dynamicTyping: false,
   });
-  return parsed.data.map((row: string[]) => row.map((cell: string) => toStringValue(cell)));
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  for (const parseError of parsed.errors) {
+    const rowLabel =
+      parseError.row !== undefined && parseError.row !== null ? `linha ${parseError.row + 1}` : "linha desconhecida";
+    const message = `CSV ${rowLabel}: ${parseError.message}`;
+    if (parseError.code === "UndetectableDelimiter") {
+      warnings.push(message);
+      continue;
+    }
+    warnings.push(message);
+  }
+
+  const matrix = parsed.data.map((row: string[]) => row.map((cell: string) => toStringValue(cell)));
+  if (matrix.length > 0 && matrix[0].length > 0) {
+    matrix[0][0] = matrix[0][0].replace(/^\uFEFF/, "");
+  }
+  if (matrix.length === 0) {
+    errors.push("CSV sem linhas legiveis apos parsing.");
+  }
+
+  return { matrix, warnings, errors };
 }
 
 function matrixFromExcel(buffer: Buffer): string[][] {
