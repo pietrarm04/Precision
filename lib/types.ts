@@ -1,0 +1,158 @@
+export type DatasetType =
+  | "sales"
+  | "finance"
+  | "inventory"
+  | "survey_satisfaction"
+  | "productivity"
+  | "inspection_checklist"
+  | "operations_maintenance"
+  | "generic";
+
+export type ColumnType = "number" | "date" | "string" | "boolean" | "mixed" | "empty";
+
+export type RowMap = Record<string, unknown>;
+
+export interface ParsedTabularFile {
+  fileName: string;
+  extension: "csv" | "xlsx" | "xls";
+  headers: string[];
+  rows: RowMap[];
+  warnings: string[];
+}
+
+export interface NormalizedDataset {
+  headers: string[];
+  rows: RowMap[];
+  duplicateHeaders: string[];
+  removedColumns: string[];
+  normalizationNotes: string[];
+  rawWarnings: string[];
+}
+
+export interface DatasetTypeInference {
+  datasetType: DatasetType;
+  confidence: number;
+  reasons: string[];
+  scores: Record<DatasetType, number>;
+}
+
+export type QAOutcome = "yes" | "no" | "pass" | "fail" | "na" | "unknown";
+export type SemanticQuestionPolarity = "positive" | "negative" | "neutral";
+export type SemanticResult = "real_failure" | "non_failure" | "na" | "undetermined";
+
+export interface QAItem {
+  question: string;
+  responseRaw: string;
+  normalizedOutcome: QAOutcome;
+  section?: string;
+  date?: string;
+  semanticPolarity: SemanticQuestionPolarity;
+  semanticResult: SemanticResult;
+  critical: boolean;
+  weight: number;
+  sourceRow: RowMap;
+}
+
+export interface WeightedIssue {
+  question: string;
+  section?: string;
+  failures: number;
+  total: number;
+  failureRate: number;
+  weight: number;
+  critical: boolean;
+  weightedScore: number;
+}
+
+export interface DashboardWidget {
+  id: string;
+  title: string;
+  description: string;
+  widgetType: "bar" | "line" | "pie" | "table";
+  data: Array<Record<string, string | number>>;
+  config: Record<string, unknown>;
+}
+
+export interface ManualQuestionOverride {
+  questionText: string;
+  behavior: "positive" | "negative" | "neutral" | "ignore";
+  includeInAnalysis: boolean;
+  weight: number;
+  critical: boolean;
+  reason?: string;
+}
+
+export interface ManualSectionWeight {
+  section: string;
+  weight: number;
+}
+
+export interface ManualReviewConfig {
+  mode: "quick" | "reviewed";
+  binaryInterpretationMode:
+    | "auto"
+    | "treat_yes_as_positive"
+    | "treat_no_as_failure"
+    | "treat_yes_as_failure_for_negative_questions";
+  questionOverrides: ManualQuestionOverride[];
+  sectionWeights: ManualSectionWeight[];
+  notes?: string;
+}
+
+export interface AnalysisResult {
+  datasetType: DatasetType;
+  datasetTypeConfidence: number;
+  rowCount: number;
+  columnCount: number;
+  structuralQuality: {
+    score: number;
+    label: "limpo" | "intermediario" | "baguncado";
+    notes: string[];
+  };
+  columnProfiles: Array<{
+    name: string;
+    type: ColumnType;
+    missingCount: number;
+    sampleValues: string[];
+  }>;
+  summaryCards: Array<{
+    label: string;
+    value: string;
+    emphasis?: "default" | "success" | "warning" | "danger";
+  }>;
+  dashboardWidgets: DashboardWidget[];
+  insights: string[];
+  alerts: string[];
+  summaryText: string;
+  interpretedPreview: RowMap[];
+  qaAnalysis?: {
+    totalItems: number;
+    realFailures: number;
+    nonFailures: number;
+    notApplicable: number;
+    undetermined: number;
+    bySection: Array<{ section: string; total: number }>;
+    topFailedQuestions: Array<{ question: string; total: number }>;
+    weightedIssues: WeightedIssue[];
+    ambiguousQuestions: ManualQuestionOverride[];
+  };
+  transparency: {
+    normalizationActions: string[];
+    parsingWarnings: string[];
+    appliedRules: {
+      mode: "quick" | "reviewed";
+      binaryInterpretationMode: ManualReviewConfig["binaryInterpretationMode"];
+      questionOverrides: number;
+      sectionWeights: number;
+      notes: string;
+    };
+  };
+  normalizedRowsForExport: RowMap[];
+}
+
+export interface AnalyzeRequestPayload {
+  fileName: string;
+  fileBase64: string;
+  mode: "quick" | "reviewed";
+  rules?: ManualReviewConfig;
+}

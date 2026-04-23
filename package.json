@@ -1,0 +1,49 @@
+{
+  "name": "workspace",
+  "version": "1.0.0",
+  "description": "MVP de analise automatica de arquivos tabulares",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pietrarm04/Precision.git"
+  },
+  "keywords": [
+    "analytics",
+    "csv",
+    "excel",
+    "inspection",
+    "safetyculture"
+  ],
+  "author": "Cursor Cloud Agent",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/pietrarm04/Precision/issues"
+  },
+  "homepage": "https://github.com/pietrarm04/Precision#readme",
+  "dependencies": {
+    "next": "^16.2.4",
+    "papaparse": "^5.5.3",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "recharts": "^3.8.1",
+    "uuid": "^14.0.0",
+    "xlsx": "^0.18.5",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/papaparse": "^5.5.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.2.4",
+    "typescript": "^6.0.3"
+  }
+}

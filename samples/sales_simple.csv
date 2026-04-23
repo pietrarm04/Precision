@@ -1,0 +1,16 @@
+data,produto,categoria,vendedor,unidade,quantidade,valor_total,status
+2026-01-03,Cafe Premium,Bebidas,Ana,SP-Centro,40,1200.50,Concluido
+2026-01-05,Cha Verde,Bebidas,Bruno,SP-Centro,28,790.10,Concluido
+2026-01-06,Biscoito Integral,Alimentos,Carla,RJ-Norte,52,1450.00,Concluido
+2026-01-08,Suco Laranja,Bebidas,Ana,RJ-Norte,33,980.00,Concluido
+2026-01-09,Barra Cereal,Alimentos,Diego,MG-Sul,45,1100.30,Concluido
+2026-01-11,Cafe Premium,Bebidas,Carla,MG-Sul,36,1080.00,Concluido
+2026-01-13,Agua Mineral,Bebidas,Bruno,SP-Centro,120,900.00,Concluido
+2026-01-14,Granola,Alimentos,Ana,RJ-Norte,25,760.20,Concluido
+2026-01-16,Suco Laranja,Bebidas,Diego,MG-Sul,41,1220.00,Concluido
+2026-01-20,Cha Verde,Bebidas,Carla,SP-Centro,30,860.00,Concluido
+2026-02-02,Cafe Premium,Bebidas,Ana,SP-Centro,44,1320.90,Concluido
+2026-02-03,Biscoito Integral,Alimentos,Bruno,RJ-Norte,49,1388.40,Concluido
+2026-02-07,Barra Cereal,Alimentos,Carla,MG-Sul,39,950.00,Concluido
+2026-02-08,Agua Mineral,Bebidas,Diego,RJ-Norte,130,975.20,Concluido
+2026-02-10,Granola,Alimentos,Ana,SP-Centro,31,900.00,Concluido

@@ -1,0 +1,21 @@
+Exportado em;2026-04-22;template;Food Safety Daily
+Inspecao ID;A-9912;Auditor;Maria Silva
+Unidade;Loja Centro;Cidade;Campinas
+Secao;Pergunta;Resposta;Observacao;Peso sugerido
+Higiene;Ambiente esta limpo?;Nao;Piso sujo proximo ao estoque;3
+Higiene;Ausencia de pragas?;Nao;Foram encontradas fezes de roedor;5
+Higiene;Ha odor putrido?;Sim;Odor forte em area fria;4
+Equipamentos;Existe vazamento no freezer?;Sim;Vazamento na porta lateral;4
+Equipamentos;Termometro esta calibrado?;Nao conforme;Ultima calibracao vencida;4
+Equipamentos;Iluminacao funcionando?;Sim;;2
+Documentacao;Checklist diario preenchido?;Nao;Nao havia registro no turno noturno;3
+Documentacao;Produto esta conforme?;Nao conforme;Dois lotes sem etiqueta;5
+Documentacao;Foto evidencia;N/A;anexo_8821.jpg;
+Pragas;Existe sinal de infestacao?;Sim;Baratas na area de descarte;5
+Pragas;Controle de pragas atualizado?;Nao;Contrato expirado;4
+Estoque;Produto vencido identificado?;Sim;3 unidades vencidas;5
+Estoque;Area de estoque organizada?;Nao;Caixas no chao;2
+Estoque;Produto segregado por categoria?;Conforme;;2
+Caixa;Fila acima de 20 minutos?;Sim;Horario de pico sem reforco;2
+Caixa;Sistema operando normalmente?;Pass;;2
+Caixa;Registro de incidente de seguranca?;No;Sem ocorrencias;3
