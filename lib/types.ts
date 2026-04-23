@@ -99,6 +99,16 @@ export interface ManualReviewConfig {
   notes?: string;
 }
 
+export interface SourceScoreSummary {
+  score: number;
+  totalScore: number;
+  compliancePercentage: number;
+  scoreColumn: string;
+  totalScoreColumn: string;
+  isMaxScore: boolean;
+  explanation: string;
+}
+
 export interface AnalysisResult {
   datasetType: DatasetType;
   datasetTypeConfidence: number;
@@ -125,12 +135,14 @@ export interface AnalysisResult {
   alerts: string[];
   summaryText: string;
   interpretedPreview: RowMap[];
+  sourceScore?: SourceScoreSummary;
   qaAnalysis?: {
     totalItems: number;
     realFailures: number;
     nonFailures: number;
     notApplicable: number;
     undetermined: number;
+    sourceScore?: SourceScoreSummary;
     bySection: Array<{ section: string; total: number }>;
     topFailedQuestions: Array<{ question: string; total: number }>;
     weightedIssues: WeightedIssue[];

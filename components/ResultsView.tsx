@@ -16,6 +16,15 @@ function qualityPill(score: number): { text: string; cls: string } {
 
 export function ResultsView({ result }: Props) {
   const q = qualityPill(result.structuralQuality.score);
+  const sourceScore = result.sourceScore ?? result.qaAnalysis?.sourceScore;
+  const complianceText = sourceScore
+    ? `${sourceScore.compliancePercentage.toFixed(sourceScore.isMaxScore ? 0 : 1)}% de conformidade`
+    : null;
+  const complianceExplanation = sourceScore?.isMaxScore
+    ? "Nenhuma não conformidade identificada. Pontuação máxima atingida."
+    : sourceScore
+      ? `Pontuação no arquivo de origem: ${sourceScore.score}/${sourceScore.totalScore}. Nenhuma não conformidade identificada.`
+      : null;
   return (
     <div className="grid" style={{ gap: 20 }}>
       <div className="card">
@@ -42,6 +51,30 @@ export function ResultsView({ result }: Props) {
       </div>
 
       <StatCards cards={result.summaryCards} />
+
+      {sourceScore && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Interpretação da pontuação</h3>
+          <p style={{ margin: "0 0 8px", fontSize: 24, fontWeight: 700 }}>{complianceText}</p>
+          <p style={{ margin: "0 0 8px", color: "var(--muted)" }}>
+            A pontuação foi lida diretamente do arquivo de origem. O valor{" "}
+            <strong>
+              {sourceScore.score}/{sourceScore.totalScore}
+            </strong>{" "}
+            significa{" "}
+            {sourceScore.compliancePercentage.toFixed(sourceScore.isMaxScore ? 0 : 1)}% da pontuação total
+            disponível.
+          </p>
+          {complianceExplanation && (
+            <p style={{ margin: 0, color: sourceScore.isMaxScore ? "var(--success)" : "var(--muted)" }}>
+              {complianceExplanation}
+            </p>
+          )}
+          <p style={{ marginTop: 10, marginBottom: 0, fontSize: 12, color: "var(--muted)" }}>
+            Valores brutos (apoio): score={sourceScore.score} | totalScore={sourceScore.totalScore}
+          </p>
+        </div>
+      )}
 
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Dashboard automatico</h3>

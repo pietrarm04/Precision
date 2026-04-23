@@ -10,6 +10,7 @@ import {
   QAItem,
   QAOutcome,
   SemanticQuestionPolarity,
+  SourceScoreSummary,
   WeightedIssue,
 } from "@/lib/types";
 import {
@@ -421,7 +422,9 @@ function createSummaryCards(
   inference: DatasetTypeInference,
   structure: ReturnType<typeof structuralQuality>,
   qaItems: QAItem[],
+  sourceScoreSummary?: SourceScoreSummary,
 ): SummaryCard[] {
+  const formatPct = (value: number) => (Number.isInteger(value) ? `${value}%` : `${value.toFixed(1)}%`);
   const cards: SummaryCard[] = [
     { label: "Linhas", value: dataset.rows.length.toLocaleString("pt-BR") },
     { label: "Colunas", value: dataset.headers.length.toLocaleString("pt-BR") },
@@ -435,6 +438,14 @@ function createSummaryCards(
       emphasis: structure.score < 0.5 ? "warning" : "success",
     },
   ];
+
+  if (sourceScoreSummary) {
+    cards.unshift({
+      label: "Conformidade",
+      value: formatPct(sourceScoreSummary.compliancePercentage),
+      emphasis: sourceScoreSummary.isMaxScore ? "success" : "default",
+    });
+  }
 
   if (qaItems.length > 0) {
     const failures = qaItems.filter((item) => item.semanticResult === "real_failure").length;
@@ -631,6 +642,64 @@ function createDataPreview(dataset: NormalizedDataset, limit = 12): Record<strin
     }
     return obj;
   });
+}
+
+function findSourceScoreColumns(dataset: NormalizedDataset): { scoreColumn?: string; totalScoreColumn?: string } {
+  const byKeyword = (pattern: RegExp, excludes?: RegExp) =>
+    dataset.headers.find((header) => {
+      const normalized = header.toLowerCase();
+      if (excludes?.test(normalized)) {
+        return false;
+      }
+      return pattern.test(normalized);
+    });
+
+  const scoreColumn =
+    byKeyword(/^(score|pontuacao|pontuação|nota)$/i, /(total|maximo|máximo|overall|geral|final)/i) ??
+    byKeyword(/(^|[_\s-])(score|pontuacao|pontuação|nota)($|[_\s-])/i, /(total|maximo|máximo|overall|geral|final)/i);
+  const totalScoreColumn =
+    byKeyword(/^(totalscore|total_score|total score|pontuacao total|pontuação total|nota maxima|nota máxima)$/i) ??
+    byKeyword(
+      /(^|[_\s-])(total score|total_score|totalscore|max score|maximo|máximo|pontuacao total|pontuação total|nota maxima|nota máxima)($|[_\s-])/i,
+      /^(score|pontuacao|pontuação|nota)$/i,
+    );
+
+  if (!scoreColumn || !totalScoreColumn || scoreColumn === totalScoreColumn) {
+    return {};
+  }
+  return { scoreColumn, totalScoreColumn };
+}
+
+function buildSourceScoreSummary(dataset: NormalizedDataset): SourceScoreSummary | undefined {
+  const { scoreColumn, totalScoreColumn } = findSourceScoreColumns(dataset);
+  if (!scoreColumn || !totalScoreColumn || dataset.rows.length === 0) {
+    return undefined;
+  }
+
+  const latestRow = dataset.rows[0];
+  const score = safeNumber(latestRow[scoreColumn]);
+  const totalScore = safeNumber(latestRow[totalScoreColumn]);
+  if (score === null || totalScore === null || totalScore <= 0) {
+    return undefined;
+  }
+
+  const compliancePercentage = clamp((score / totalScore) * 100, 0, 100);
+  const isMaxScore = Math.abs(totalScore - score) < 0.0001;
+  const explanation = isMaxScore
+    ? `A pontuacao veio do arquivo de origem: ${score}/${totalScore}. Isso representa pontuacao maxima atingida e 100% de conformidade.`
+    : `A pontuacao veio do arquivo de origem: ${score}/${totalScore}, equivalente a ${compliancePercentage.toFixed(
+        1,
+      )}% de conformidade.`;
+
+  return {
+    score,
+    totalScore,
+    compliancePercentage,
+    scoreColumn,
+    totalScoreColumn,
+    isMaxScore,
+    explanation,
+  };
 }
 
 function calculateWeightedIssues(qaItems: QAItem[]): WeightedIssue[] {
@@ -851,7 +920,14 @@ export function analyzeDataset(
     : { items: [] as QAItem[] };
   const weightedIssues = calculateWeightedIssues(qaItems);
 
-  const summaryCards = createSummaryCards(normalized, inference, structure, qaItems);
+  const sourceScoreSummary = buildSourceScoreSummary(normalized);
+  const summaryCards = createSummaryCards(
+    normalized,
+    inference,
+    structure,
+    qaItems,
+    sourceScoreSummary,
+  );
   const widgets = shouldInspect
     ? createInspectionWidgets(qaItems, weightedIssues)
     : createGenericWidgets(normalized, columnTypes, inference.datasetType);
@@ -876,13 +952,22 @@ export function analyzeDataset(
         notes: "Analise automatica sem revisao manual.",
       };
 
-  const summaryText = [
+  const summaryTextParts = [
     `Tipo inferido: ${inference.datasetType} (${Math.round(confidenceFromScore(inference.confidence) * 100)}% de confianca).`,
     `Estrutura: ${structure.label} com ${normalized.rows.length} linhas e ${normalized.headers.length} colunas.`,
     qaItems.length > 0
       ? `Checklist interpretado com ${qaItems.filter((item) => item.semanticResult === "real_failure").length} falhas reais em ${qaItems.length} itens avaliados.`
       : "Analise executada com heuristicas automaticas para dados tabulares gerais.",
-  ].join(" ");
+  ];
+
+  if (sourceScoreSummary) {
+    summaryTextParts.push(sourceScoreSummary.explanation);
+    if (sourceScoreSummary.isMaxScore) {
+      summaryTextParts.push("Nenhuma nao conformidade identificada. Pontuacao maxima atingida.");
+    }
+  }
+
+  const summaryText = summaryTextParts.join(" ");
 
   return {
     datasetType: inference.datasetType,
@@ -912,6 +997,7 @@ export function analyzeDataset(
     alerts,
     summaryText,
     interpretedPreview: preview,
+    sourceScore: sourceScoreSummary,
     qaAnalysis:
       qaItems.length > 0
         ? {
@@ -920,6 +1006,7 @@ export function analyzeDataset(
             nonFailures: qaItems.filter((item) => item.semanticResult === "non_failure").length,
             notApplicable: qaItems.filter((item) => item.semanticResult === "na").length,
             undetermined: qaItems.filter((item) => item.semanticResult === "undetermined").length,
+            sourceScore: sourceScoreSummary,
             bySection: topN(
               countBy(
                 qaItems.map((item) => item.section || "Sem secao"),
