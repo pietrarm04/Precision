@@ -18,6 +18,10 @@ async function fileToBase64(file: File): Promise<string> {
   });
 }
 
+function assertValidFile(file: File | null): file is File {
+  return isValidTabularFile(file);
+}
+
 function createDefaultRules(result: AnalysisResult): ManualReviewConfig {
   return {
     mode: "reviewed",
@@ -28,12 +32,20 @@ function createDefaultRules(result: AnalysisResult): ManualReviewConfig {
   };
 }
 
+function isValidTabularFile(file: File | null): boolean {
+  if (!file) {
+    return false;
+  }
+  return /\.(csv|xlsx|xls)$/i.test(file.name);
+}
+
 export default function HomePage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [quickMode, setQuickMode] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [debugJson, setDebugJson] = useState<string | null>(null);
   const [rules, setRules] = useState<ManualReviewConfig | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryText, setSummaryText] = useState<string | null>(null);
@@ -46,12 +58,13 @@ export default function HomePage() {
   }, [selectedFile]);
 
   async function runAnalysis(mode: "quick" | "reviewed", reviewRules?: ManualReviewConfig) {
-    if (!selectedFile) {
-      setError("Selecione um arquivo antes de iniciar a analise.");
+    if (!assertValidFile(selectedFile)) {
+      setError("Selecione um arquivo CSV, XLSX ou XLS antes de iniciar a analise.");
       return;
     }
     setLoading(true);
     setError(null);
+    setDebugJson(null);
     try {
       const payload = {
         fileName: selectedFile.name,
@@ -69,10 +82,13 @@ export default function HomePage() {
         throw new Error(data.error ?? data.message ?? "Erro ao processar arquivo.");
       }
       setResult(data);
+      setDebugJson(JSON.stringify(data, null, 2));
       if (mode === "reviewed") {
         setRules(reviewRules ?? createDefaultRules(data));
       }
     } catch (analysisError) {
+      setResult(null);
+      setDebugJson(null);
       setError(
         analysisError instanceof Error
           ? analysisError.message
@@ -131,8 +147,14 @@ export default function HomePage() {
           accept=".csv,.xlsx,.xls"
           onChange={(event) => {
             const file = event.target.files?.[0] ?? null;
+            if (file && !isValidTabularFile(file)) {
+              setSelectedFile(null);
+              setError("Arquivo invalido. Envie apenas CSV, XLSX ou XLS.");
+              return;
+            }
             setSelectedFile(file);
             setResult(null);
+            setDebugJson(null);
             setRules(null);
             setSummaryText(null);
             setError(null);
@@ -166,17 +188,38 @@ export default function HomePage() {
             type="button"
             className="btn"
             onClick={() => runAnalysis(quickMode ? "quick" : "reviewed", quickMode ? undefined : rules ?? undefined)}
-            disabled={!selectedFile || loading}
+            disabled={!isValidTabularFile(selectedFile) || loading}
           >
             {loading ? "Processando..." : "Processar arquivo"}
           </button>
         </div>
+        {loading && <div className="pill">Processando arquivo e aguardando resposta da API...</div>}
         {error && (
           <div className="pill danger" style={{ width: "fit-content" }}>
             {error}
           </div>
         )}
       </section>
+
+      {debugJson && (
+        <section className="card">
+          <h3 style={{ marginTop: 0 }}>Debug temporario: JSON bruto retornado</h3>
+          <pre
+            style={{
+              margin: 0,
+              whiteSpace: "pre-wrap",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+              fontSize: 12,
+              lineHeight: 1.45,
+              color: "var(--muted)",
+              maxHeight: 320,
+              overflow: "auto",
+            }}
+          >
+            {debugJson}
+          </pre>
+        </section>
+      )}
 
       {result && !quickMode && rules && (
         <RuleReviewPanel
