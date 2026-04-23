@@ -23,6 +23,7 @@ import {
   median,
   normalizeHeader,
   safeNumber,
+  toDate,
   toStringValue,
   topN,
 } from "@/lib/utils";
@@ -35,6 +36,9 @@ type SummaryCard = {
 
 const DEFAULT_WEIGHT = 1;
 const MAX_CATEGORY_FOR_BAR = 12;
+const MAX_WIDGETS_HIGH_RELIABILITY = 4;
+const MAX_WIDGETS_MEDIUM_RELIABILITY = 2;
+const MAX_WIDGETS_LOW_RELIABILITY = 1;
 
 const statusPassTokens = [
   "conforme",
@@ -417,6 +421,163 @@ function firstDateColumn(dataset: NormalizedDataset, columnTypes: Record<string,
   return dataset.headers.find((header) => columnTypes[header] === "date");
 }
 
+type DashboardReliability = "low" | "medium" | "high";
+
+type DashboardSelectionContext = {
+  rowCount: number;
+  structuralScore: number;
+  missingRatio: number;
+  inferenceConfidence: number;
+  datasetType: DatasetType;
+};
+
+type DashboardSelectionMeta = {
+  attempted: number;
+  rendered: number;
+  reliability: DashboardReliability;
+  maxWidgets: number;
+};
+
+function calculateMissingRatio(dataset: NormalizedDataset): number {
+  if (dataset.rows.length === 0 || dataset.headers.length === 0) {
+    return 1;
+  }
+  const missingCount = dataset.rows.reduce((sum, row) => {
+    return sum + dataset.headers.reduce((acc, header) => acc + (isMissing(row[header]) ? 1 : 0), 0);
+  }, 0);
+  const totalCells = dataset.rows.length * dataset.headers.length;
+  return totalCells > 0 ? missingCount / totalCells : 1;
+}
+
+function bucketNumericByMonth(
+  rows: NormalizedDataset["rows"],
+  dateColumn: string,
+  valueColumn: string,
+): Array<[string, number]> {
+  const grouped = new Map<string, number>();
+  for (const row of rows) {
+    const isoDate = toDate(row[dateColumn]);
+    const numeric = safeNumber(row[valueColumn]);
+    if (!isoDate || numeric === null) {
+      continue;
+    }
+    const date = new Date(isoDate);
+    const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+    grouped.set(key, (grouped.get(key) ?? 0) + numeric);
+  }
+  return [...grouped.entries()].sort(([a], [b]) => (a > b ? 1 : -1));
+}
+
+function groupByCount(dataset: NormalizedDataset, categoryColumn: string): Map<string, number> {
+  return countBy(
+    dataset.rows
+      .map((row) => toStringValue(row[categoryColumn]).trim())
+      .filter((value) => value.length > 0),
+  );
+}
+
+function groupBySum(
+  dataset: NormalizedDataset,
+  categoryColumn: string,
+  numericColumn: string,
+): Map<string, number> {
+  const grouped = new Map<string, number>();
+  for (const row of dataset.rows) {
+    const category = toStringValue(row[categoryColumn]).trim() || "Nao informado";
+    const numeric = safeNumber(row[numericColumn]);
+    if (numeric === null) {
+      continue;
+    }
+    grouped.set(category, (grouped.get(category) ?? 0) + numeric);
+  }
+  return grouped;
+}
+
+function findNumericColumnByPattern(
+  dataset: NormalizedDataset,
+  columnTypes: Record<string, ColumnType>,
+  pattern: RegExp,
+): string | undefined {
+  return dataset.headers.find((header) => columnTypes[header] === "number" && pattern.test(header.toLowerCase()));
+}
+
+function firstNumericColumn(
+  dataset: NormalizedDataset,
+  columnTypes: Record<string, ColumnType>,
+): string | undefined {
+  return dataset.headers.find((header) => columnTypes[header] === "number");
+}
+
+function firstStringColumnByPattern(
+  dataset: NormalizedDataset,
+  columnTypes: Record<string, ColumnType>,
+  pattern: RegExp,
+): string | undefined {
+  return dataset.headers.find(
+    (header) =>
+      (columnTypes[header] === "string" || columnTypes[header] === "mixed") &&
+      pattern.test(header.toLowerCase()),
+  );
+}
+
+function selectDashboardReliability(context: DashboardSelectionContext): DashboardReliability {
+  if (
+    context.rowCount < 10 ||
+    context.structuralScore < 0.45 ||
+    context.missingRatio > 0.55 ||
+    context.inferenceConfidence < 0.35
+  ) {
+    return "low";
+  }
+  if (
+    context.rowCount < 30 ||
+    context.structuralScore < 0.72 ||
+    context.missingRatio > 0.35 ||
+    context.inferenceConfidence < 0.6
+  ) {
+    return "medium";
+  }
+  return "high";
+}
+
+function isWidgetInformative(widget: DashboardWidget): boolean {
+  if (widget.widgetType === "table") {
+    return widget.data.length >= 2;
+  }
+  if (widget.widgetType === "line") {
+    return widget.data.length >= 3;
+  }
+  return widget.data.length >= 2;
+}
+
+function selectDashboardWidgets(
+  candidates: DashboardWidget[],
+  context: DashboardSelectionContext,
+): { widgets: DashboardWidget[]; meta: DashboardSelectionMeta } {
+  const deduped = candidates.filter(
+    (widget, index, allWidgets) => allWidgets.findIndex((candidate) => candidate.id === widget.id) === index,
+  );
+  const informativeWidgets = deduped.filter(isWidgetInformative);
+  const reliability = selectDashboardReliability(context);
+  const baseMax =
+    reliability === "high"
+      ? MAX_WIDGETS_HIGH_RELIABILITY
+      : reliability === "medium"
+        ? MAX_WIDGETS_MEDIUM_RELIABILITY
+        : MAX_WIDGETS_LOW_RELIABILITY;
+  const maxWidgets = context.datasetType === "generic" ? Math.min(baseMax, 3) : baseMax;
+  const widgets = informativeWidgets.slice(0, maxWidgets);
+  return {
+    widgets,
+    meta: {
+      attempted: informativeWidgets.length,
+      rendered: widgets.length,
+      reliability,
+      maxWidgets,
+    },
+  };
+}
+
 function createSummaryCards(
   dataset: NormalizedDataset,
   inference: DatasetTypeInference,
@@ -446,7 +607,6 @@ function createSummaryCards(
       emphasis: sourceScoreSummary.isMaxScore ? "success" : "default",
     });
   }
-
   if (qaItems.length > 0) {
     const failures = qaItems.filter((item) => item.semanticResult === "real_failure").length;
     const na = qaItems.filter((item) => item.semanticResult === "na").length;
@@ -473,47 +633,53 @@ function createInspectionWidgets(qaItems: QAItem[], weightedIssues: WeightedIssu
   const na = qaItems.filter((i) => i.semanticResult === "na").length;
   const und = qaItems.filter((i) => i.semanticResult === "undetermined").length;
 
-  widgets.push({
-    id: "inspection-outcome-breakdown",
-    title: "Distribuicao de resultado interpretado",
-    description: "Classificacao semantica entre falha real, conformidade, NA e indeterminado.",
-    widgetType: "bar",
-    data: [
-      { label: "Falha real", value: failures },
-      { label: "Conforme", value: nonFailures },
-      { label: "Nao aplicavel", value: na },
-      { label: "Indeterminado", value: und },
-    ],
-    config: { xKey: "label", yKey: "value" },
-  });
+  if (total > 0) {
+    widgets.push({
+      id: "inspection-outcome-breakdown",
+      title: "Distribuicao de resultado interpretado",
+      description: "Classificacao semantica entre falha real, conformidade, NA e indeterminado.",
+      widgetType: "bar",
+      data: [
+        { label: "Falha real", value: failures },
+        { label: "Conforme", value: nonFailures },
+        { label: "Nao aplicavel", value: na },
+        { label: "Indeterminado", value: und },
+      ],
+      config: { xKey: "label", yKey: "value" },
+    });
+  }
 
   const bySection = countBy(
     qaItems
       .filter((item) => item.semanticResult === "real_failure")
       .map((item) => item.section || "Sem secao"),
   );
-  widgets.push({
-    id: "inspection-sections-failures",
-    title: "Falhas por secao",
-    description: "Sinaliza areas mais problematicas.",
-    widgetType: "bar",
-    data: topN(bySection, 10).map(([section, count]) => ({ section, count })),
-    config: { xKey: "section", yKey: "count" },
-  });
+  if (bySection.size > 0) {
+    widgets.push({
+      id: "inspection-sections-failures",
+      title: "Falhas por secao",
+      description: "Sinaliza areas mais problematicas.",
+      widgetType: "bar",
+      data: topN(bySection, 10).map(([section, count]) => ({ section, count })),
+      config: { xKey: "section", yKey: "count" },
+    });
+  }
 
   const byQuestion = countBy(
     qaItems
       .filter((item) => item.semanticResult === "real_failure")
       .map((item) => item.question),
   );
-  widgets.push({
-    id: "inspection-questions-failures",
-    title: "Perguntas com mais falhas",
-    description: "Ranking de itens com maior recorrencia de nao conformidade real.",
-    widgetType: "bar",
-    data: topN(byQuestion, 12).map(([question, count]) => ({ question, count })),
-    config: { xKey: "question", yKey: "count" },
-  });
+  if (byQuestion.size > 0) {
+    widgets.push({
+      id: "inspection-questions-failures",
+      title: "Perguntas com mais falhas",
+      description: "Ranking de itens com maior recorrencia de nao conformidade real.",
+      widgetType: "bar",
+      data: topN(byQuestion, 12).map(([question, count]) => ({ question, count })),
+      config: { xKey: "question", yKey: "count" },
+    });
+  }
 
   if (weightedIssues.length > 0) {
     widgets.push({
@@ -529,7 +695,7 @@ function createInspectionWidgets(qaItems: QAItem[], weightedIssues: WeightedIssu
     });
   }
 
-  if (total > 0) {
+  if (total > 0 && failures + nonFailures > 0) {
     widgets.push({
       id: "inspection-rate-donut",
       title: "Taxa de falha e conformidade",
@@ -545,10 +711,328 @@ function createInspectionWidgets(qaItems: QAItem[], weightedIssues: WeightedIssu
   return widgets;
 }
 
-function createGenericWidgets(
+function createSalesFinanceWidgets(
   dataset: NormalizedDataset,
   columnTypes: Record<string, ColumnType>,
-  datasetType: DatasetType,
+  datasetType: "sales" | "finance",
+): DashboardWidget[] {
+  const widgets: DashboardWidget[] = [];
+  const numeric = numericProfiles(dataset, columnTypes);
+  const categorical = topCategoricalColumns(dataset, columnTypes);
+  const dateCol = firstDateColumn(dataset, columnTypes);
+  const moneyColumn =
+    findNumericColumnByPattern(
+      dataset,
+      columnTypes,
+      /(fatur|receita|valor|total|price|amount|custo|expense|despesa|revenue|sales)/i,
+    ) ?? firstNumericColumn(dataset, columnTypes);
+  const groupColumn =
+    categorical.find((entry) => entry.column !== moneyColumn && entry.distinct >= 2 && entry.distinct <= 25)?.column ??
+    categorical[0]?.column;
+
+  if (dateCol && moneyColumn) {
+    const monthlyTotals = bucketNumericByMonth(dataset.rows, dateCol, moneyColumn);
+    if (monthlyTotals.length > 1) {
+      widgets.push({
+        id: `${datasetType}-monthly-value-trend`,
+        title: "Evolucao temporal do valor total",
+        description: "Tendencia mensal somando o principal valor monetario.",
+        widgetType: "line",
+        data: monthlyTotals.map(([period, value]) => ({ period, value: Number(value.toFixed(2)) })),
+        config: { xKey: "period", yKey: "value" },
+      });
+    }
+  }
+
+  if (groupColumn && moneyColumn) {
+    const groupedValues = groupBySum(dataset, groupColumn, moneyColumn);
+    if (groupedValues.size > 1) {
+      widgets.push({
+        id: `${datasetType}-group-ranking-by-value`,
+        title: `Ranking por ${normalizeHeader(groupColumn)}`,
+        description:
+          datasetType === "sales"
+            ? "Prioriza os grupos com maior faturamento."
+            : "Prioriza os grupos com maior concentracao de valor financeiro.",
+        widgetType: "bar",
+        data: topN(groupedValues, MAX_CATEGORY_FOR_BAR).map(([group, value]) => ({
+          group,
+          value: Number(value.toFixed(2)),
+        })),
+        config: { xKey: "group", yKey: "value" },
+      });
+    }
+  }
+
+  if (groupColumn) {
+    const groupedCount = groupByCount(dataset, groupColumn);
+    if (groupedCount.size > 1) {
+      widgets.push({
+        id: `${datasetType}-group-volume`,
+        title: "Volume de registros por grupo",
+        description: "Mostra concentracao operacional por categoria principal.",
+        widgetType: "bar",
+        data: topN(groupedCount, MAX_CATEGORY_FOR_BAR).map(([group, count]) => ({ group, count })),
+        config: { xKey: "group", yKey: "count" },
+      });
+    }
+  }
+
+  if (moneyColumn) {
+    const profile = numeric.find((entry) => entry.column === moneyColumn);
+    if (profile) {
+      widgets.push({
+        id: `${datasetType}-value-summary`,
+        title: `Resumo numerico: ${normalizeHeader(moneyColumn)}`,
+        description: "Resumo estatistico para apoiar decisao executiva.",
+        widgetType: "table",
+        data: [
+          { metrica: "Media", valor: Number(profile.mean.toFixed(2)) },
+          { metrica: "Mediana", valor: Number(profile.med.toFixed(2)) },
+          { metrica: "Minimo", valor: Number(profile.min.toFixed(2)) },
+          { metrica: "Maximo", valor: Number(profile.max.toFixed(2)) },
+          { metrica: "Amplitude", valor: Number(profile.range.toFixed(2)) },
+        ],
+        config: { columns: ["metrica", "valor"] },
+      });
+    }
+  }
+
+  return widgets;
+}
+
+function createInventoryWidgets(
+  dataset: NormalizedDataset,
+  columnTypes: Record<string, ColumnType>,
+): DashboardWidget[] {
+  const widgets: DashboardWidget[] = [];
+  const categorical = topCategoricalColumns(dataset, columnTypes);
+  const quantityColumn =
+    findNumericColumnByPattern(dataset, columnTypes, /(qtd|quant|quantity|estoque|stock|saldo|inventory)/i) ??
+    firstNumericColumn(dataset, columnTypes);
+  const categoryColumn =
+    categorical.find((entry) =>
+      /(categoria|category|tipo|type|grupo|familia|family|secao|seção)/i.test(entry.column.toLowerCase()),
+    )?.column ?? categorical[0]?.column;
+  const itemColumn =
+    firstStringColumnByPattern(
+      dataset,
+      columnTypes,
+      /(produto|product|item|sku|material|codigo|c[oó]digo|descricao|descri[cç][aã]o|nome)/i,
+    ) ?? categoryColumn;
+  const dateCol = firstDateColumn(dataset, columnTypes);
+
+  if (categoryColumn) {
+    const groupedCount = groupByCount(dataset, categoryColumn);
+    if (groupedCount.size > 1) {
+      widgets.push({
+        id: "inventory-category-volume",
+        title: "Itens por categoria",
+        description: "Ranking das categorias com maior volume de itens.",
+        widgetType: "bar",
+        data: topN(groupedCount, MAX_CATEGORY_FOR_BAR).map(([category, count]) => ({ category, count })),
+        config: { xKey: "category", yKey: "count" },
+      });
+    }
+  }
+
+  if (categoryColumn && quantityColumn) {
+    const groupedStock = groupBySum(dataset, categoryColumn, quantityColumn);
+    if (groupedStock.size > 1) {
+      widgets.push({
+        id: "inventory-stock-by-category",
+        title: "Estoque total por categoria",
+        description: "Soma de quantidade para identificar concentracao de estoque.",
+        widgetType: "bar",
+        data: topN(groupedStock, MAX_CATEGORY_FOR_BAR).map(([category, quantity]) => ({
+          category,
+          quantity: Number(quantity.toFixed(2)),
+        })),
+        config: { xKey: "category", yKey: "quantity" },
+      });
+    }
+  }
+
+  if (itemColumn && quantityColumn) {
+    const lowStockRows = dataset.rows
+      .map((row) => ({
+        item: toStringValue(row[itemColumn]).trim() || "Nao informado",
+        quantity: safeNumber(row[quantityColumn]),
+      }))
+      .filter(
+        (entry): entry is { item: string; quantity: number } =>
+          entry.item.length > 0 && entry.quantity !== null && Number.isFinite(entry.quantity),
+      )
+      .sort((a, b) => a.quantity - b.quantity)
+      .slice(0, 10);
+    if (lowStockRows.length >= 3) {
+      widgets.push({
+        id: "inventory-low-stock",
+        title: "Itens com menor quantidade",
+        description: "Prioriza itens com menor saldo para acao de reposicao.",
+        widgetType: "table",
+        data: lowStockRows.map((entry) => ({
+          item: entry.item,
+          quantidade: Number(entry.quantity.toFixed(2)),
+        })),
+        config: { columns: ["item", "quantidade"] },
+      });
+    }
+  }
+
+  if (dateCol && quantityColumn) {
+    const monthlyMovement = bucketNumericByMonth(dataset.rows, dateCol, quantityColumn);
+    if (monthlyMovement.length > 1) {
+      widgets.push({
+        id: "inventory-monthly-movement",
+        title: "Movimento mensal de estoque",
+        description: "Evolucao mensal da coluna principal de quantidade.",
+        widgetType: "line",
+        data: monthlyMovement.map(([period, quantity]) => ({
+          period,
+          quantity: Number(quantity.toFixed(2)),
+        })),
+        config: { xKey: "period", yKey: "quantity" },
+      });
+    }
+  }
+
+  return widgets;
+}
+
+function createSurveyWidgets(
+  dataset: NormalizedDataset,
+  columnTypes: Record<string, ColumnType>,
+): DashboardWidget[] {
+  const widgets: DashboardWidget[] = [];
+  const ratingColumn =
+    findNumericColumnByPattern(
+      dataset,
+      columnTypes,
+      /(nota|rating|score|satisf|nps|avaliac|avalia[cç][aã]o|pontua[cç][aã]o)/i,
+    ) ?? firstNumericColumn(dataset, columnTypes);
+  const questionColumn =
+    firstStringColumnByPattern(dataset, columnTypes, /(pergunta|question|item|tema|topico|t[oó]pico|criterio|crit[eé]rio)/i) ??
+    firstStringColumnByPattern(dataset, columnTypes, /(categoria|category|aspecto|dimens[aã]o)/i);
+  const dateCol = firstDateColumn(dataset, columnTypes);
+
+  if (ratingColumn) {
+    const distribution = new Map<string, number>();
+    for (const row of dataset.rows) {
+      const value = safeNumber(row[ratingColumn]);
+      if (value === null) {
+        continue;
+      }
+      const bucket = String(Math.round(value));
+      distribution.set(bucket, (distribution.get(bucket) ?? 0) + 1);
+    }
+    if (distribution.size > 1) {
+      widgets.push({
+        id: "survey-rating-distribution",
+        title: `Distribuicao de ${normalizeHeader(ratingColumn)}`,
+        description: "Mostra concentracao das notas atribuídas.",
+        widgetType: "bar",
+        data: [...distribution.entries()]
+          .sort(([a], [b]) => Number(a) - Number(b))
+          .map(([rating, count]) => ({ rating, count })),
+        config: { xKey: "rating", yKey: "count" },
+      });
+    }
+  }
+
+  if (questionColumn && ratingColumn) {
+    const grouped = new Map<string, { sum: number; count: number }>();
+    for (const row of dataset.rows) {
+      const question = toStringValue(row[questionColumn]).trim();
+      const value = safeNumber(row[ratingColumn]);
+      if (!question || value === null) {
+        continue;
+      }
+      const current = grouped.get(question) ?? { sum: 0, count: 0 };
+      current.sum += value;
+      current.count += 1;
+      grouped.set(question, current);
+    }
+    const lowAverage = [...grouped.entries()]
+      .map(([question, stats]) => ({
+        question,
+        averageScore: stats.count > 0 ? stats.sum / stats.count : 0,
+      }))
+      .sort((a, b) => a.averageScore - b.averageScore)
+      .slice(0, 10);
+    if (lowAverage.length >= 2) {
+      widgets.push({
+        id: "survey-lowest-average-questions",
+        title: "Perguntas com pior media",
+        description: "Destaca temas com desempenho mais baixo.",
+        widgetType: "bar",
+        data: lowAverage.map((entry) => ({
+          question: entry.question,
+          averageScore: Number(entry.averageScore.toFixed(2)),
+        })),
+        config: { xKey: "question", yKey: "averageScore" },
+      });
+    }
+  }
+
+  if (dateCol && ratingColumn) {
+    const monthly = new Map<string, { sum: number; count: number }>();
+    for (const row of dataset.rows) {
+      const isoDate = toDate(row[dateCol]);
+      const rating = safeNumber(row[ratingColumn]);
+      if (!isoDate || rating === null) {
+        continue;
+      }
+      const date = new Date(isoDate);
+      const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+      const current = monthly.get(key) ?? { sum: 0, count: 0 };
+      current.sum += rating;
+      current.count += 1;
+      monthly.set(key, current);
+    }
+    const series = [...monthly.entries()]
+      .sort(([a], [b]) => (a > b ? 1 : -1))
+      .map(([period, stats]) => ({
+        period,
+        averageScore: stats.count > 0 ? Number((stats.sum / stats.count).toFixed(2)) : 0,
+      }));
+    if (series.length > 1) {
+      widgets.push({
+        id: "survey-monthly-score-trend",
+        title: "Evolucao temporal da satisfacao",
+        description: "Tendencia mensal da media de notas.",
+        widgetType: "line",
+        data: series,
+        config: { xKey: "period", yKey: "averageScore" },
+      });
+    }
+  }
+
+  if (ratingColumn) {
+    const profile = numericProfiles(dataset, columnTypes).find((entry) => entry.column === ratingColumn);
+    if (profile) {
+      widgets.push({
+        id: "survey-score-summary",
+        title: `Resumo numerico: ${normalizeHeader(ratingColumn)}`,
+        description: "Estatisticas principais para leitura rapida.",
+        widgetType: "table",
+        data: [
+          { metrica: "Media", valor: Number(profile.mean.toFixed(2)) },
+          { metrica: "Mediana", valor: Number(profile.med.toFixed(2)) },
+          { metrica: "Minimo", valor: Number(profile.min.toFixed(2)) },
+          { metrica: "Maximo", valor: Number(profile.max.toFixed(2)) },
+        ],
+        config: { columns: ["metrica", "valor"] },
+      });
+    }
+  }
+
+  return widgets;
+}
+
+function createOperationsWidgets(
+  dataset: NormalizedDataset,
+  columnTypes: Record<string, ColumnType>,
 ): DashboardWidget[] {
   const widgets: DashboardWidget[] = [];
   const numeric = numericProfiles(dataset, columnTypes);
@@ -569,18 +1053,19 @@ function createGenericWidgets(
     }
   }
 
-  if (categorical.length > 0) {
-    const target = categorical[0]?.column;
-    if (target) {
-      const counts = countBy(
-        dataset.rows
-          .map((row) => toStringValue(row[target]).trim())
-          .filter((value) => value.length > 0),
-      );
+  const operationalCategory =
+    categorical.find((entry) =>
+      /(status|estado|situac|situa[cç][aã]o|resultado|categoria|category|tipo|type|time|equipe|team|turno|shift)/i.test(
+        entry.column.toLowerCase(),
+      ),
+    )?.column ?? categorical[0]?.column;
+  if (operationalCategory) {
+    const counts = groupByCount(dataset, operationalCategory);
+    if (counts.size > 1) {
       widgets.push({
-        id: "top-category",
-        title: `Distribuicao por ${normalizeHeader(target)}`,
-        description: "Ranking das categorias mais relevantes.",
+        id: "operations-category-ranking",
+        title: `Ranking por ${normalizeHeader(operationalCategory)}`,
+        description: "Mostra onde existe maior concentracao operacional.",
         widgetType: "bar",
         data: topN(counts, MAX_CATEGORY_FOR_BAR).map(([category, count]) => ({ category, count })),
         config: { xKey: "category", yKey: "count" },
@@ -588,10 +1073,30 @@ function createGenericWidgets(
     }
   }
 
+  const metricColumn =
+    findNumericColumnByPattern(dataset, columnTypes, /(tempo|time|durac|dura[cç][aã]o|produt|output|volume|qtd|quant|sla|atraso|delay|custo|cost)/i) ??
+    numeric[0]?.column;
+  if (metricColumn && operationalCategory) {
+    const groupedMetric = groupBySum(dataset, operationalCategory, metricColumn);
+    if (groupedMetric.size > 1) {
+      widgets.push({
+        id: "operations-metric-by-category",
+        title: `Metrica total por ${normalizeHeader(operationalCategory)}`,
+        description: "Compara impacto total por grupo operacional.",
+        widgetType: "bar",
+        data: topN(groupedMetric, MAX_CATEGORY_FOR_BAR).map(([category, value]) => ({
+          category,
+          value: Number(value.toFixed(2)),
+        })),
+        config: { xKey: "category", yKey: "value" },
+      });
+    }
+  }
+
   const bestNumeric = numeric[0];
   if (bestNumeric) {
     widgets.push({
-      id: "numeric-summary",
+      id: "operations-numeric-summary",
       title: `Perfil numerico: ${normalizeHeader(bestNumeric.column)}`,
       description: "Resumo de tendencia central e variabilidade.",
       widgetType: "table",
@@ -606,32 +1111,103 @@ function createGenericWidgets(
     });
   }
 
-  if (datasetType === "sales" || datasetType === "finance") {
-    const moneyColumns = dataset.headers.filter((h) =>
-      /(fatur|receita|valor|total|price|amount|custo|expense|despesa)/i.test(h.toLowerCase()),
-    );
-    const target = moneyColumns[0];
-    const groupColumn =
-      categorical.find((entry) => entry.column !== target && entry.distinct <= 25)?.column ?? categorical[0]?.column;
-    if (target && groupColumn) {
-      const grouped = new Map<string, number>();
-      for (const row of dataset.rows) {
-        const group = toStringValue(row[groupColumn]).trim() || "Nao informado";
-        const amount = safeNumber(row[target]) ?? 0;
-        grouped.set(group, (grouped.get(group) ?? 0) + amount);
-      }
+  return widgets;
+}
+
+function createAdaptiveWidgets(
+  dataset: NormalizedDataset,
+  columnTypes: Record<string, ColumnType>,
+): DashboardWidget[] {
+  const widgets: DashboardWidget[] = [];
+  const dateCol = firstDateColumn(dataset, columnTypes);
+  const categorical = topCategoricalColumns(dataset, columnTypes);
+  const numeric = numericProfiles(dataset, columnTypes);
+
+  if (dateCol) {
+    const buckets = bucketByMonth(dataset.rows, dateCol);
+    if (buckets.length > 1) {
       widgets.push({
-        id: "money-group-ranking",
-        title: `Ranking por ${normalizeHeader(groupColumn)}`,
-        description: `Concentracao de ${datasetType === "sales" ? "faturamento" : "valor"} por grupo.`,
-        widgetType: "bar",
-        data: topN(grouped, 12).map(([group, amount]) => ({ group, amount: Number(amount.toFixed(2)) })),
-        config: { xKey: "group", yKey: "amount" },
+        id: "generic-time-trend",
+        title: "Evolucao temporal de registros",
+        description: "Volume de registros por periodo para leitura de tendencia.",
+        widgetType: "line",
+        data: buckets.map(([period, count]) => ({ period, count })),
+        config: { xKey: "period", yKey: "count" },
       });
     }
   }
 
+  const primaryCategory = categorical.find((entry) => entry.distinct >= 2 && entry.distinct <= 25)?.column;
+  if (primaryCategory) {
+    const counts = groupByCount(dataset, primaryCategory);
+    if (counts.size > 1) {
+      widgets.push({
+        id: "generic-category-ranking",
+        title: `Distribuicao por ${normalizeHeader(primaryCategory)}`,
+        description: "Ranking das categorias dominantes do dataset.",
+        widgetType: "bar",
+        data: topN(counts, MAX_CATEGORY_FOR_BAR).map(([category, count]) => ({ category, count })),
+        config: { xKey: "category", yKey: "count" },
+      });
+    }
+  }
+
+  const primaryNumeric = numeric[0]?.column;
+  if (primaryCategory && primaryNumeric) {
+    const grouped = groupBySum(dataset, primaryCategory, primaryNumeric);
+    if (grouped.size > 1) {
+      widgets.push({
+        id: "generic-numeric-by-category",
+        title: `${normalizeHeader(primaryNumeric)} por categoria`,
+        description: "Comparacao do principal valor numerico por categoria.",
+        widgetType: "bar",
+        data: topN(grouped, MAX_CATEGORY_FOR_BAR).map(([category, value]) => ({
+          category,
+          value: Number(value.toFixed(2)),
+        })),
+        config: { xKey: "category", yKey: "value" },
+      });
+    }
+  }
+
+  const bestNumeric = numeric[0];
+  if (bestNumeric) {
+    widgets.push({
+      id: "generic-numeric-summary",
+      title: `Resumo numerico: ${normalizeHeader(bestNumeric.column)}`,
+      description: "Estatisticas basicas para coluna numerica principal.",
+      widgetType: "table",
+      data: [
+        { metrica: "Media", valor: Number(bestNumeric.mean.toFixed(2)) },
+        { metrica: "Mediana", valor: Number(bestNumeric.med.toFixed(2)) },
+        { metrica: "Minimo", valor: Number(bestNumeric.min.toFixed(2)) },
+        { metrica: "Maximo", valor: Number(bestNumeric.max.toFixed(2)) },
+      ],
+      config: { columns: ["metrica", "valor"] },
+    });
+  }
+
   return widgets;
+}
+
+function createDatasetWidgets(
+  dataset: NormalizedDataset,
+  columnTypes: Record<string, ColumnType>,
+  datasetType: DatasetType,
+): DashboardWidget[] {
+  if (datasetType === "sales" || datasetType === "finance") {
+    return createSalesFinanceWidgets(dataset, columnTypes, datasetType);
+  }
+  if (datasetType === "inventory") {
+    return createInventoryWidgets(dataset, columnTypes);
+  }
+  if (datasetType === "survey_satisfaction") {
+    return createSurveyWidgets(dataset, columnTypes);
+  }
+  if (datasetType === "productivity" || datasetType === "operations_maintenance") {
+    return createOperationsWidgets(dataset, columnTypes);
+  }
+  return createAdaptiveWidgets(dataset, columnTypes);
 }
 
 function createDataPreview(dataset: NormalizedDataset, limit = 12): Record<string, unknown>[] {
@@ -701,7 +1277,6 @@ function buildSourceScoreSummary(dataset: NormalizedDataset): SourceScoreSummary
     explanation,
   };
 }
-
 function calculateWeightedIssues(qaItems: QAItem[]): WeightedIssue[] {
   const byQuestion = new Map<
     string,
@@ -759,6 +1334,7 @@ function createInsights(
   columnTypes: Record<string, ColumnType>,
   qaItems: QAItem[],
   weightedIssues: WeightedIssue[],
+  dashboardMeta: DashboardSelectionMeta,
 ): string[] {
   const insights: string[] = [];
   const confidence = Math.round(confidenceFromScore(inference.confidence) * 100);
@@ -766,15 +1342,7 @@ function createInsights(
     `O dataset foi classificado como ${inference.datasetType} com confianca de ${confidence}%, usando nomes de colunas e padroes de valores.`,
   );
 
-  const missingRatio = dataset.rows.length
-    ? dataset.rows.reduce((sum, row) => {
-        return (
-          sum +
-          dataset.headers.reduce((acc, header) => acc + (isMissing(row[header]) ? 1 : 0), 0)
-        );
-      }, 0) /
-      (dataset.rows.length * Math.max(dataset.headers.length, 1))
-    : 0;
+  const missingRatio = calculateMissingRatio(dataset);
   insights.push(
     `A qualidade estrutural foi avaliada como ${structure.label}; cerca de ${Math.round(
       missingRatio * 100,
@@ -818,6 +1386,16 @@ function createInsights(
     }
   }
 
+  if (dashboardMeta.rendered === 0) {
+    insights.push(
+      "Os dashboards foram reduzidos ao minimo porque os dados atuais nao sustentam comparacoes confiaveis.",
+    );
+  } else if (dashboardMeta.rendered < dashboardMeta.attempted) {
+    insights.push(
+      `Foram priorizados ${dashboardMeta.rendered} dashboards de maior utilidade para evitar graficos de baixa confiabilidade.`,
+    );
+  }
+
   while (insights.length < 5) {
     insights.push(
       "A analise manteve postura conservadora: quando a confianca da inferencia e baixa, os resultados sao apresentados como indicativos e nao conclusivos.",
@@ -833,6 +1411,7 @@ function createAlerts(
   structure: ReturnType<typeof structuralQuality>,
   qaItems: QAItem[],
   weightedIssues: WeightedIssue[],
+  dashboardMeta: DashboardSelectionMeta,
 ): string[] {
   const alerts: string[] = [];
   if (structure.score < 0.5) {
@@ -859,6 +1438,11 @@ function createAlerts(
     if (weightedIssues.length > 0 && weightedIssues[0].weight <= 1 && weightedIssues[0].failureRate > 0.4) {
       alerts.push("Falhas relevantes sem pesos diferenciados; considere configurar criticidade.");
     }
+  }
+  if (dashboardMeta.rendered === 0) {
+    alerts.push("Dados insuficientes para dashboards confiaveis; apenas indicadores essenciais foram mantidos.");
+  } else if (dashboardMeta.rendered < dashboardMeta.attempted) {
+    alerts.push("Parte dos dashboards foi omitida para evitar visualizacoes com baixa confianca.");
   }
   if (alerts.length === 0) {
     alerts.push("Nenhum alerta estrutural critico detectado.");
@@ -928,12 +1512,34 @@ export function analyzeDataset(
     qaItems,
     sourceScoreSummary,
   );
-  const widgets = shouldInspect
+  const widgetCandidates = shouldInspect
     ? createInspectionWidgets(qaItems, weightedIssues)
-    : createGenericWidgets(normalized, columnTypes, inference.datasetType);
+    : createDatasetWidgets(normalized, columnTypes, inference.datasetType);
+  const { widgets, meta: dashboardMeta } = selectDashboardWidgets(widgetCandidates, {
+    rowCount: normalized.rows.length,
+    structuralScore: structure.score,
+    missingRatio: calculateMissingRatio(normalized),
+    inferenceConfidence: confidenceFromScore(inference.confidence),
+    datasetType: inference.datasetType,
+  });
 
-  const insights = createInsights(normalized, inference, structure, columnTypes, qaItems, weightedIssues);
-  const alerts = createAlerts(normalized, inference, structure, qaItems, weightedIssues);
+  const insights = createInsights(
+    normalized,
+    inference,
+    structure,
+    columnTypes,
+    qaItems,
+    weightedIssues,
+    dashboardMeta,
+  );
+  const alerts = createAlerts(
+    normalized,
+    inference,
+    structure,
+    qaItems,
+    weightedIssues,
+    dashboardMeta,
+  );
   const preview = createDataPreview(normalized);
 
   const appliedRules: AnalysisResult["transparency"]["appliedRules"] = reviewConfig
@@ -952,22 +1558,21 @@ export function analyzeDataset(
         notes: "Analise automatica sem revisao manual.",
       };
 
-  const summaryTextParts = [
+  const summaryText = [
     `Tipo inferido: ${inference.datasetType} (${Math.round(confidenceFromScore(inference.confidence) * 100)}% de confianca).`,
     `Estrutura: ${structure.label} com ${normalized.rows.length} linhas e ${normalized.headers.length} colunas.`,
     qaItems.length > 0
       ? `Checklist interpretado com ${qaItems.filter((item) => item.semanticResult === "real_failure").length} falhas reais em ${qaItems.length} itens avaliados.`
       : "Analise executada com heuristicas automaticas para dados tabulares gerais.",
-  ];
-
+  ].join(" ");
+  const summaryTextParts = [summaryText];
   if (sourceScoreSummary) {
     summaryTextParts.push(sourceScoreSummary.explanation);
     if (sourceScoreSummary.isMaxScore) {
       summaryTextParts.push("Nenhuma nao conformidade identificada. Pontuacao maxima atingida.");
     }
   }
-
-  const summaryText = summaryTextParts.join(" ");
+  const mergedSummaryText = summaryTextParts.join(" ");
 
   return {
     datasetType: inference.datasetType,
@@ -1001,7 +1606,7 @@ export function analyzeDataset(
     dashboardWidgets: widgets,
     insights,
     alerts,
-    summaryText,
+    summaryText: mergedSummaryText,
     interpretedPreview: preview,
     sourceScore: sourceScoreSummary,
     qaAnalysis:

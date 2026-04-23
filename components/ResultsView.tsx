@@ -75,7 +75,6 @@ export function ResultsView({ result }: Props) {
           </p>
         </div>
       )}
-
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Dashboard automatico</h3>
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>

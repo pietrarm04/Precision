@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { RuleReviewPanel } from "@/components/RuleReviewPanel";
 import { ResultsView } from "@/components/ResultsView";
 import { AnalysisResult, ManualQuestionOverride, ManualReviewConfig } from "@/lib/types";
@@ -21,7 +21,6 @@ async function fileToBase64(file: File): Promise<string> {
 function assertValidFile(file: File | null): file is File {
   return isValidTabularFile(file);
 }
-
 function createDefaultRules(result: AnalysisResult): ManualReviewConfig {
   return {
     mode: "reviewed",
@@ -39,6 +38,22 @@ function isValidTabularFile(file: File | null): boolean {
   return /\.(csv|xlsx|xls)$/i.test(file.name);
 }
 
+function appendClientDebugLog(payload: {
+  hypothesisId: string;
+  location: string;
+  message: string;
+  data: Record<string, unknown>;
+  timestamp: number;
+}) {
+  // #region agent log
+  void fetch("/api/debug-log", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+  // #endregion
+}
+
 export default function HomePage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [quickMode, setQuickMode] = useState(true);
@@ -49,6 +64,9 @@ export default function HomePage() {
   const [rules, setRules] = useState<ManualReviewConfig | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryText, setSummaryText] = useState<string | null>(null);
+  const [sampleFiles, setSampleFiles] = useState<string[]>([]);
+  const [selectedSample, setSelectedSample] = useState<string>("");
+  const [sampleLoading, setSampleLoading] = useState(false);
 
   const fileInfo = useMemo(() => {
     if (!selectedFile) {
@@ -58,7 +76,29 @@ export default function HomePage() {
   }, [selectedFile]);
 
   async function runAnalysis(mode: "quick" | "reviewed", reviewRules?: ManualReviewConfig) {
+    // #region agent log
+    appendClientDebugLog({
+      hypothesisId: "C",
+      location: "app/page.tsx:runAnalysis-entry",
+      message: "runAnalysis invoked",
+      data: {
+        mode,
+        hasSelectedFile: Boolean(selectedFile),
+        loading,
+      },
+      timestamp: Date.now(),
+    });
+    // #endregion
     if (!assertValidFile(selectedFile)) {
+      // #region agent log
+      appendClientDebugLog({
+        hypothesisId: "C",
+        location: "app/page.tsx:runAnalysis-no-file-branch",
+        message: "runAnalysis exited without selected file",
+        data: { mode, loading },
+        timestamp: Date.now(),
+      });
+      // #endregion
       setError("Selecione um arquivo CSV, XLSX ou XLS antes de iniciar a analise.");
       return;
     }
@@ -66,9 +106,24 @@ export default function HomePage() {
     setError(null);
     setDebugJson(null);
     try {
+      const fileBase64 = await fileToBase64(selectedFile);
+      // #region agent log
+      appendClientDebugLog({
+        hypothesisId: "C",
+        location: "app/page.tsx:runAnalysis-before-fetch",
+        message: "Prepared payload for /api/analyze",
+        data: {
+          mode,
+          fileSize: selectedFile.size,
+          fileType: selectedFile.type || "unknown",
+          base64Length: fileBase64.length,
+        },
+        timestamp: Date.now(),
+      });
+      // #endregion
       const payload = {
         fileName: selectedFile.name,
-        fileBase64: await fileToBase64(selectedFile),
+        fileBase64,
         mode,
         rules: reviewRules,
       };
@@ -96,6 +151,84 @@ export default function HomePage() {
       );
     } finally {
       setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    // #region agent log
+    appendClientDebugLog({
+      hypothesisId: "A",
+      location: "app/page.tsx:state-effect",
+      message: "State snapshot updated",
+      data: {
+        hasSelectedFile: Boolean(selectedFile),
+        selectedFileSize: selectedFile?.size ?? null,
+        loading,
+        derivedDisabled: !selectedFile || loading,
+      },
+      timestamp: Date.now(),
+    });
+    // #endregion
+  }, [selectedFile, loading]);
+
+  useEffect(() => {
+    async function loadSampleFiles() {
+      try {
+        const response = await fetch("/api/sample-files");
+        if (!response.ok) {
+          return;
+        }
+        const data = (await response.json()) as { files?: string[] };
+        const files = data.files ?? [];
+        setSampleFiles(files);
+        if (files.length > 0) {
+          setSelectedSample(files[0]);
+        }
+      } catch {
+        // Intencionalmente silencioso: o uploader local continua funcionando.
+      }
+    }
+    void loadSampleFiles();
+  }, []);
+
+  function decodeBase64(base64: string): ArrayBuffer {
+    const binary = atob(base64);
+    const buffer = new ArrayBuffer(binary.length);
+    const bytes = new Uint8Array(buffer);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return buffer;
+  }
+
+  async function loadSampleFile() {
+    if (!selectedSample) {
+      return;
+    }
+    setSampleLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/sample-files?name=${encodeURIComponent(selectedSample)}`);
+      const data = (await response.json()) as {
+        fileName?: string;
+        fileBase64?: string;
+        mimeType?: string;
+        message?: string;
+      };
+      if (!response.ok || !data.fileName || !data.fileBase64) {
+        throw new Error(data.message ?? "Falha ao carregar arquivo de exemplo.");
+      }
+      const file = new File([decodeBase64(data.fileBase64)], data.fileName, {
+        type: data.mimeType ?? "application/octet-stream",
+      });
+      setSelectedFile(file);
+      setResult(null);
+      setRules(null);
+      setSummaryText(null);
+    } catch (sampleError) {
+      setError(sampleError instanceof Error ? sampleError.message : "Falha ao carregar exemplo.");
+    } finally {
+      setSampleLoading(false);
     }
   }
 
@@ -146,7 +279,27 @@ export default function HomePage() {
           type="file"
           accept=".csv,.xlsx,.xls"
           onChange={(event) => {
-            const file = event.target.files?.[0] ?? null;
+            const files = event.currentTarget.files;
+            const file = files?.[0] ?? null;
+            // #region agent log
+            appendClientDebugLog({
+              hypothesisId: "B",
+              location: "app/page.tsx:file-input-onChange",
+              message: "File input changed",
+              data: {
+                fileCount: files?.length ?? 0,
+                selectedFileSize: file?.size ?? null,
+                selectedFileType: file?.type ?? "none",
+              },
+              timestamp: Date.now(),
+            });
+            // #endregion
+            if (!file) {
+              setError(
+                "Nenhum arquivo foi selecionado. Se estiver em ambiente remoto, escolha um arquivo local do computador ou use o carregamento de exemplo.",
+              );
+              return;
+            }
             if (file && !isValidTabularFile(file)) {
               setSelectedFile(null);
               setError("Arquivo invalido. Envie apenas CSV, XLSX ou XLS.");
@@ -160,6 +313,38 @@ export default function HomePage() {
             setError(null);
           }}
         />
+        <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
+          Se o seletor de arquivos nao conseguir abrir caminhos como <code>/workspace/... </code>, use
+          um arquivo local do navegador ou o carregador de exemplos abaixo.
+        </p>
+        {sampleFiles.length > 0 && (
+          <div className="card" style={{ padding: 12 }}>
+            <div style={{ display: "grid", gap: 8 }}>
+              <strong>Carregar arquivo de exemplo do servidor</strong>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <select
+                  value={selectedSample}
+                  onChange={(event) => setSelectedSample(event.target.value)}
+                  style={{ minWidth: 240, width: "auto", flex: "1 1 240px" }}
+                >
+                  {sampleFiles.map((sampleFile) => (
+                    <option key={sampleFile} value={sampleFile}>
+                      {sampleFile}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() => void loadSampleFile()}
+                  disabled={sampleLoading || loading}
+                >
+                  {sampleLoading ? "Carregando exemplo..." : "Carregar exemplo"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {fileInfo && <div style={{ color: "var(--muted)" }}>{fileInfo}</div>}
         <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <label className="card" style={{ padding: 12 }}>
@@ -187,7 +372,28 @@ export default function HomePage() {
           <button
             type="button"
             className="btn"
-            onClick={() => runAnalysis(quickMode ? "quick" : "reviewed", quickMode ? undefined : rules ?? undefined)}
+            onClick={() => {
+              const mode = quickMode ? "quick" : "reviewed";
+              const derivedDisabled = !isValidTabularFile(selectedFile) || loading;
+              // #region agent log
+              appendClientDebugLog({
+                hypothesisId: "D",
+                location: "app/page.tsx:process-button-onClick",
+                message: "Process button click received",
+                data: {
+                  mode,
+                  hasSelectedFile: Boolean(selectedFile),
+                  loading,
+                  derivedDisabled,
+                },
+                timestamp: Date.now(),
+              });
+              // #endregion
+              if (derivedDisabled) {
+                return;
+              }
+              void runAnalysis(mode, quickMode ? undefined : rules ?? undefined);
+            }}
             disabled={!isValidTabularFile(selectedFile) || loading}
           >
             {loading ? "Processando..." : "Processar arquivo"}
@@ -220,7 +426,6 @@ export default function HomePage() {
           </pre>
         </section>
       )}
-
       {result && !quickMode && rules && (
         <RuleReviewPanel
           qaAnalysis={result.qaAnalysis}

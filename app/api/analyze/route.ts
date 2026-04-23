@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { runAnalysisPipeline } from "@/lib/pipeline";
+import { appendDebugLog } from "@/lib/debugLog";
 
 export const runtime = "nodejs";
 
@@ -50,7 +51,6 @@ function toArrayBuffer(buffer: Buffer): ArrayBuffer {
 function isSupportedExtension(fileName: string): boolean {
   return /\.(csv|xlsx|xls)$/i.test(fileName);
 }
-
 export async function POST(request: Request) {
   try {
     const raw = await request.json();
@@ -76,6 +76,20 @@ export async function POST(request: Request) {
       );
     }
 
+    // #region agent log
+    appendDebugLog({
+      hypothesisId: "E",
+      location: "app/api/analyze/route.ts:POST-entry",
+      message: "Analyze API received payload",
+      data: {
+        mode: payload.mode,
+        fileName: payload.fileName,
+        hasRules: Boolean(payload.rules),
+        base64Length: payload.fileBase64.length,
+      },
+      timestamp: Date.now(),
+    });
+    // #endregion
     const result = runAnalysisPipeline(
       payload.fileName,
       toArrayBuffer(fileBuffer),

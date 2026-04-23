@@ -6,32 +6,12 @@ import { normalizeHeader, toStringValue } from "@/lib/utils";
 const MAX_ROWS = 50_000;
 const HEADER_SCAN_LIMIT = 18;
 
-function matrixFromCsv(
-  buffer: Buffer,
-): { matrix: string[][]; warnings: string[]; errors: string[] } {
-  const warnings: string[] = [];
-  const errors: string[] = [];
+function matrixFromCsv(buffer: Buffer): string[][] {
   const csv = buffer.toString("utf-8");
   const parsed = Papa.parse<string[]>(csv, {
     skipEmptyLines: false,
-    delimiter: "",
-    dynamicTyping: false,
-  }) as Papa.ParseResult<string[]>;
-  if (parsed.errors.length > 0) {
-    warnings.push(
-      `${parsed.errors.length} inconsistencias detectadas no CSV; analise parcial pode conter aproximacoes.`,
-    );
-    for (const issue of parsed.errors.slice(0, 10)) {
-      errors.push(
-        `CSV linha ${issue.row ?? "?"}: ${issue.code} - ${issue.message}`,
-      );
-    }
-  }
-  const matrix = parsed.data.map((row: string[]) => row.map((cell: string) => toStringValue(cell)));
-  if (matrix.length > 0 && matrix[0]?.length > 0) {
-    matrix[0][0] = matrix[0][0].replace(/^\uFEFF/, "");
-  }
-  return { matrix, warnings, errors };
+  });
+  return parsed.data.map((row: string[]) => row.map((cell: string) => toStringValue(cell)));
 }
 
 function matrixFromExcel(buffer: Buffer): string[][] {
