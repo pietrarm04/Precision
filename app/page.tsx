@@ -79,6 +79,9 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [debugJson, setDebugJson] = useState<string | null>(null);
+  const [batchResults, setBatchResults] = useState<
+    Array<{ fileName: string; result?: AnalysisResult; error?: string }> | null
+  >(null);
   const [submitDebugMessage, setSubmitDebugMessage] = useState<string | null>(null);
   const [rules, setRules] = useState<ManualReviewConfig | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -135,6 +138,7 @@ export default function HomePage() {
     setLoading(true);
     setError(null);
     setDebugJson(null);
+    setBatchResults(null);
     try {
       const formData = new FormData();
       selectedFiles.forEach((file) => formData.append("files", file));
@@ -183,6 +187,7 @@ export default function HomePage() {
           throw new Error(batchErrors || "Nenhum arquivo foi processado com sucesso.");
         }
         setResult(firstSuccess);
+        setBatchResults(data.results);
         setDebugJson(JSON.stringify(data, null, 2));
         if (mode === "reviewed") {
           setRules(reviewRules ?? createDefaultRules(firstSuccess));
@@ -190,6 +195,7 @@ export default function HomePage() {
       } else {
         const singleResult = data as AnalysisResult & { error?: string; message?: string };
         setResult(singleResult);
+        setBatchResults(null);
         setDebugJson(JSON.stringify(singleResult, null, 2));
         if (mode === "reviewed") {
           setRules(reviewRules ?? createDefaultRules(singleResult));
@@ -198,6 +204,7 @@ export default function HomePage() {
     } catch (analysisError) {
       setResult(null);
       setDebugJson(null);
+      setBatchResults(null);
       setError(
         analysisError instanceof Error
           ? analysisError.message
@@ -277,6 +284,7 @@ export default function HomePage() {
       });
       setSelectedFiles([file]);
       setResult(null);
+      setBatchResults(null);
       setRules(null);
       setSummaryText(null);
       setSubmitDebugMessage(null);
@@ -351,6 +359,7 @@ export default function HomePage() {
             setSelectedFiles(files);
             setResult(null);
             setDebugJson(null);
+            setBatchResults(null);
             setRules(null);
             setSummaryText(null);
             setSubmitDebugMessage(null);
@@ -753,25 +762,6 @@ export default function HomePage() {
         )}
       </section>
 
-      {debugJson && (
-        <section className="card">
-          <h3 style={{ marginTop: 0 }}>Debug temporario: JSON bruto retornado</h3>
-          <pre
-            style={{
-              margin: 0,
-              whiteSpace: "pre-wrap",
-              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-              fontSize: 12,
-              lineHeight: 1.45,
-              color: "var(--muted)",
-              maxHeight: 320,
-              overflow: "auto",
-            }}
-          >
-            {debugJson}
-          </pre>
-        </section>
-      )}
       {result && !quickMode && rules && (
         <RuleReviewPanel
           qaAnalysis={result.qaAnalysis}
@@ -817,7 +807,7 @@ export default function HomePage() {
               </pre>
             </section>
           )}
-          <ResultsView result={result} />
+          <ResultsView result={result} debugJson={debugJson} batchResults={batchResults} />
         </>
       )}
     </main>
