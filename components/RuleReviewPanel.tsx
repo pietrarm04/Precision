@@ -103,10 +103,10 @@ export function RuleReviewPanel({
                 <input
                   type="number"
                   min={1}
-                  max={5}
+                  max={3}
                   value={item.weight}
                   onChange={(event) => {
-                    const weight = Math.max(1, Math.min(5, Number(event.target.value) || 1));
+                    const weight = Math.max(1, Math.min(3, Number(event.target.value) || 1));
                     setState((prev) => {
                       const next = [...prev.sectionWeights];
                       next[index] = { ...next[index], weight };
@@ -161,11 +161,11 @@ export function RuleReviewPanel({
                     <input
                       type="number"
                       min={1}
-                      max={5}
+                      max={3}
                       value={item.weight}
                       onChange={(event) => {
                         const weight = Number(event.target.value);
-                        updateOverride(index, { weight: Number.isFinite(weight) ? Math.max(1, Math.min(5, weight)) : 1 });
+                        updateOverride(index, { weight: Number.isFinite(weight) ? Math.max(1, Math.min(3, weight)) : 1 });
                       }}
                     />
                   </td>

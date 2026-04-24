@@ -10,14 +10,14 @@ const questionOverrideSchema = z.object({
   questionText: z.string(),
   behavior: z.enum(["positive", "negative", "neutral", "ignore"]),
   includeInAnalysis: z.boolean().default(true),
-  weight: z.number().min(1).max(5).default(1),
+  weight: z.number().min(1).max(3).default(1),
   critical: z.boolean().default(false),
   reason: z.string().optional(),
 });
 
 const sectionWeightSchema = z.object({
   section: z.string(),
-  weight: z.number().min(1).max(5),
+  weight: z.number().min(1).max(3),
 });
 
 const reviewSchema = z.object({
@@ -70,7 +70,7 @@ const dashboardConfigSchema = z.object({
     .array(
       z.object({
         questionText: z.string().min(1),
-        weight: z.number().min(1).max(5),
+        weight: z.number().min(1).max(3),
       }),
     )
     .optional(),
@@ -78,7 +78,7 @@ const dashboardConfigSchema = z.object({
     .array(
       z.object({
         section: z.string().min(1),
-        weight: z.number().min(1).max(5),
+        weight: z.number().min(1).max(3),
       }),
     )
     .optional(),
@@ -86,7 +86,7 @@ const dashboardConfigSchema = z.object({
     .array(
       z.object({
         theme: z.string().min(1),
-        weight: z.number().min(1).max(5),
+        weight: z.number().min(1).max(3),
       }),
     )
     .optional(),

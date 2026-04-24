@@ -42,6 +42,7 @@ export type SemanticQuestionPolarity = "positive" | "negative" | "neutral";
 export type SemanticResult = "real_failure" | "non_failure" | "na" | "undetermined";
 export type WeightSource = "usuario_pergunta" | "usuario_secao" | "usuario_tema" | "inferido" | "default";
 export type WeightedRiskLevel = "regular" | "atencao" | "risco_multa" | "risco_interdicao";
+export type FailureSeverityLabel = "leve" | "grave" | "gravissimo";
 
 export interface QAItem {
   question: string;
@@ -124,6 +125,7 @@ export interface DashboardCustomizationConfig {
     sanitaryPerformance: boolean;
     okr: boolean;
     risk: boolean;
+    pareto: boolean;
   };
   okrs?: OkrInput[];
 }
@@ -294,6 +296,24 @@ export interface AnalysisResult {
         criticalCount: number;
         weightedRiskScore: number;
         level: WeightedRiskLevel;
+      }>;
+      missingMessage?: string;
+    };
+    pareto?: {
+      widgets: DashboardWidget[];
+      ranking: Array<{
+        dimensao: "pergunta" | "secao" | "categoria";
+        causa: string;
+        frequenciaFalhas: number;
+        impactoPonderado: number;
+        impactoPercentual: number;
+        impactoAcumulado: number;
+        pesoMedio: number;
+        criticidade: FailureSeverityLabel;
+      }>;
+      highlights: Array<{
+        dimensao: "pergunta" | "secao" | "categoria";
+        resumo: string;
       }>;
       missingMessage?: string;
     };

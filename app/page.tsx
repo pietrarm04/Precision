@@ -88,6 +88,7 @@ function createDefaultDashboardConfig(): DashboardCustomizationConfig {
       sanitaryPerformance: true,
       okr: true,
       risk: true,
+      pareto: true,
     },
     okrs: [],
   };
@@ -511,7 +512,7 @@ export default function HomePage() {
             </div>
           </div>
           <div className="card" style={{ padding: 12, display: "grid", gap: 8 }}>
-            <strong>Pesos por seção (1 a 5)</strong>
+            <strong>Pesos por seção (1 = leve, 2 = grave, 3 = gravíssimo)</strong>
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 type="button"
@@ -551,7 +552,7 @@ export default function HomePage() {
                   <input
                     type="number"
                     min={1}
-                    max={5}
+                    max={3}
                     value={item.weight}
                     onChange={(event) => {
                       const numeric = Number(event.target.value);
@@ -559,7 +560,7 @@ export default function HomePage() {
                         const next = [...(prev.sectionWeights ?? [])];
                         next[idx] = {
                           ...next[idx],
-                          weight: Number.isFinite(numeric) ? Math.max(1, Math.min(5, numeric)) : 1,
+                          weight: Number.isFinite(numeric) ? Math.max(1, Math.min(3, numeric)) : 1,
                         };
                         return { ...prev, sectionWeights: next };
                       });
@@ -583,7 +584,7 @@ export default function HomePage() {
             ))}
           </div>
           <div className="card" style={{ padding: 12, display: "grid", gap: 8 }}>
-            <strong>Pesos por tema/categoria (1 a 5)</strong>
+            <strong>Pesos por tema/categoria (1 = leve, 2 = grave, 3 = gravíssimo)</strong>
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 type="button"
@@ -623,7 +624,7 @@ export default function HomePage() {
                   <input
                     type="number"
                     min={1}
-                    max={5}
+                    max={3}
                     value={item.weight}
                     onChange={(event) => {
                       const numeric = Number(event.target.value);
@@ -631,7 +632,7 @@ export default function HomePage() {
                         const next = [...(prev.themeWeights ?? [])];
                         next[idx] = {
                           ...next[idx],
-                          weight: Number.isFinite(numeric) ? Math.max(1, Math.min(5, numeric)) : 1,
+                          weight: Number.isFinite(numeric) ? Math.max(1, Math.min(3, numeric)) : 1,
                         };
                         return { ...prev, themeWeights: next };
                       });
@@ -655,7 +656,7 @@ export default function HomePage() {
             ))}
           </div>
           <div className="card" style={{ padding: 12, display: "grid", gap: 8 }}>
-            <strong>Pesos por pergunta (1 a 5)</strong>
+            <strong>Pesos por pergunta (1 = leve, 2 = grave, 3 = gravíssimo)</strong>
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 type="button"
@@ -695,7 +696,7 @@ export default function HomePage() {
                   <input
                     type="number"
                     min={1}
-                    max={5}
+                    max={3}
                     value={item.weight}
                     onChange={(event) => {
                       const numeric = Number(event.target.value);
@@ -703,7 +704,7 @@ export default function HomePage() {
                         const next = [...(prev.questionWeights ?? [])];
                         next[idx] = {
                           ...next[idx],
-                          weight: Number.isFinite(numeric) ? Math.max(1, Math.min(5, numeric)) : 1,
+                          weight: Number.isFinite(numeric) ? Math.max(1, Math.min(3, numeric)) : 1,
                         };
                         return { ...prev, questionWeights: next };
                       });
@@ -734,6 +735,7 @@ export default function HomePage() {
                 ["sanitaryPerformance", "Performance sanitária"],
                 ["okr", "OKR"],
                 ["risk", "Risco"],
+                ["pareto", "Pontos críticos (Pareto)"],
               ].map(([key, label]) => (
                 <label key={key} className="card" style={{ padding: 10 }}>
                   <input
@@ -748,6 +750,7 @@ export default function HomePage() {
                             sanitaryPerformance: true,
                             okr: true,
                             risk: true,
+                            pareto: true,
                           }),
                           [key]: event.target.checked,
                         },

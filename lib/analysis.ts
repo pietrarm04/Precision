@@ -80,6 +80,7 @@ const DEFAULT_DASHBOARD_CONFIG: DashboardCustomizationConfig = {
     sanitaryPerformance: true,
     okr: true,
     risk: true,
+    pareto: true,
   },
   okrs: [],
 };
@@ -139,6 +140,112 @@ type GroupInspectionStats = {
   weightedRiskScore: number;
   weightedRiskLevel: WeightedRiskLevel;
 };
+
+type ParetoDimension = "pergunta" | "secao" | "categoria";
+
+type ParetoRow = {
+  causa: string;
+  falhas: number;
+  impactoPonderado: number;
+  impactoPercentual: number;
+  acumuladoPercentual: number;
+  pesoMedio: number;
+  criticidade: "leve" | "grave" | "gravissimo";
+};
+
+type ParetoResult = {
+  dimension: ParetoDimension;
+  rows: ParetoRow[];
+  top80Rows: ParetoRow[];
+  top20Count: number;
+  thresholdReachedAt: number;
+};
+
+function normalizeWeightLevel(weight: number): number {
+  const w = Number.isFinite(weight) ? Math.round(weight) : DEFAULT_WEIGHT;
+  if (w <= 1) return 1;
+  if (w === 2) return 1;
+  if (w === 3) return 2;
+  return 3;
+}
+
+function normalizeWeightScale(weight: number): number {
+  return normalizeWeightLevel(weight);
+}
+
+function normalizeWeight(weight: number): number {
+  return normalizeWeightLevel(weight);
+}
+
+type ParetoDashboard = NonNullable<NonNullable<AnalysisResult["customDashboards"]>["pareto"]>;
+
+function weightLabel(weight: number): "leve" | "grave" | "gravissimo" {
+  if (weight >= 3) return "gravissimo";
+  if (weight >= 2) return "grave";
+  return "leve";
+}
+
+function buildPareto(
+  qaItems: QAItem[],
+  dimension: ParetoDimension,
+  severityFilter?: (item: QAItem) => boolean,
+): ParetoResult {
+  const failed = qaItems.filter(
+    (item) =>
+      item.semanticResult === "real_failure" &&
+      (!severityFilter || severityFilter(item)),
+  );
+  const grouped = new Map<string, { falhas: number; impactoPonderado: number; pesoTotal: number }>();
+  for (const item of failed) {
+    const key =
+      dimension === "pergunta"
+        ? item.question || "(pergunta não identificada)"
+        : dimension === "secao"
+          ? item.section || "Sem seção"
+          : item.theme || inferThemeFromQuestion(item.question);
+    const current = grouped.get(key) ?? { falhas: 0, impactoPonderado: 0, pesoTotal: 0 };
+    current.falhas += 1;
+    current.impactoPonderado += item.weight;
+    current.pesoTotal += item.weight;
+    grouped.set(key, current);
+  }
+
+  const totalImpacto = [...grouped.values()].reduce((sum, item) => sum + item.impactoPonderado, 0);
+  const totalCausas = grouped.size;
+  const top20Count = Math.max(1, Math.ceil(totalCausas * 0.2));
+  let acumulado = 0;
+  const rows: ParetoRow[] = [...grouped.entries()]
+    .map(([causa, stats]) => ({
+      causa,
+      falhas: stats.falhas,
+      impactoPonderado: stats.impactoPonderado,
+      impactoPercentual: totalImpacto > 0 ? (stats.impactoPonderado / totalImpacto) * 100 : 0,
+      acumuladoPercentual: 0,
+      pesoMedio: stats.falhas > 0 ? stats.pesoTotal / stats.falhas : 1,
+      criticidade: "leve" as ParetoRow["criticidade"],
+    }))
+    .sort((a, b) => b.impactoPonderado - a.impactoPonderado)
+    .map((row) => {
+      acumulado += row.impactoPercentual;
+      const pesoNorm = normalizeWeightLevel(row.pesoMedio);
+      return {
+        ...row,
+        acumuladoPercentual: Math.min(100, acumulado),
+        pesoMedio: Number(pesoNorm.toFixed(2)),
+        criticidade: weightLabel(pesoNorm),
+      };
+    });
+
+  const thresholdReachedAt = rows.findIndex((row) => row.acumuladoPercentual >= 80);
+  const top80Rows = thresholdReachedAt >= 0 ? rows.slice(0, thresholdReachedAt + 1) : rows;
+  return {
+    dimension,
+    rows,
+    top80Rows,
+    top20Count,
+    thresholdReachedAt: thresholdReachedAt >= 0 ? thresholdReachedAt + 1 : 0,
+  };
+}
 
 function calculateWeightedMetricsSummary(
   qaItems: QAItem[],
@@ -401,29 +508,29 @@ function resolveQuestionWeight(args: {
 
   const qUser = args.dashboardConfig?.questionWeights?.find((item) => item.questionText === question);
   if (qUser?.weight !== undefined) {
-    return { weight: clamp(qUser.weight, 1, 5), source: "usuario_pergunta" };
+    return { weight: normalizeWeightScale(qUser.weight), source: "usuario_pergunta" };
   }
 
   const qReview = args.reviewConfig?.questionOverrides.find((entry) => entry.questionText === question);
   if (qReview?.weight !== undefined) {
-    return { weight: clamp(qReview.weight, 1, 5), source: "usuario_pergunta" };
+    return { weight: normalizeWeightScale(qReview.weight), source: "usuario_pergunta" };
   }
 
   if (section) {
     const sUser = args.dashboardConfig?.sectionWeights?.find((item) => item.section === section);
     if (sUser?.weight !== undefined) {
-      return { weight: clamp(sUser.weight, 1, 5), source: "usuario_secao" };
+      return { weight: normalizeWeightScale(sUser.weight), source: "usuario_secao" };
     }
     const sReview = args.reviewConfig?.sectionWeights.find((entry) => entry.section === section);
     if (sReview?.weight !== undefined) {
-      return { weight: clamp(sReview.weight, 1, 5), source: "usuario_secao" };
+      return { weight: normalizeWeightScale(sReview.weight), source: "usuario_secao" };
     }
   }
 
   if (theme) {
     const tUser = args.dashboardConfig?.themeWeights?.find((item) => item.theme === theme);
     if (tUser?.weight !== undefined) {
-      return { weight: clamp(tUser.weight, 1, 5), source: "usuario_tema" };
+      return { weight: normalizeWeightScale(tUser.weight), source: "usuario_tema" };
     }
   }
 
@@ -1535,14 +1642,14 @@ function calculateWeightedIssues(qaItems: QAItem[]): WeightedIssue[] {
       section: item.section,
       failures: 0,
       total: 0,
-      weight: item.weight ?? DEFAULT_WEIGHT,
+      weight: normalizeWeight(item.weight),
       critical: item.critical,
     };
     current.total += 1;
     if (item.semanticResult === "real_failure") {
       current.failures += 1;
     }
-    current.weight = Math.max(current.weight, item.weight ?? DEFAULT_WEIGHT);
+    current.weight = Math.max(current.weight, normalizeWeight(item.weight));
     current.critical = current.critical || item.critical;
     byQuestion.set(key, current);
   }
@@ -1563,6 +1670,76 @@ function calculateWeightedIssues(qaItems: QAItem[]): WeightedIssue[] {
       };
     })
     .sort((a, b) => b.weightedScore - a.weightedScore);
+}
+
+function buildParetoAnalysis(qaItems: QAItem[]): NonNullable<NonNullable<AnalysisResult["customDashboards"]>["pareto"]> {
+  const questionPareto = buildPareto(qaItems, "pergunta");
+  const sectionPareto = buildPareto(qaItems, "secao");
+  const categoryPareto = buildPareto(qaItems, "categoria");
+  const combined = [
+    ...questionPareto.rows.map((row) => mapParetoRowToDashboard(row, "pergunta")),
+    ...sectionPareto.rows.map((row) => mapParetoRowToDashboard(row, "secao")),
+    ...categoryPareto.rows.map((row) => mapParetoRowToDashboard(row, "categoria")),
+  ]
+    .sort((a, b) => b.impactoPonderado - a.impactoPonderado)
+    .slice(0, 30);
+  const highlights: NonNullable<NonNullable<AnalysisResult["customDashboards"]>["pareto"]>["highlights"] = [];
+  if (questionPareto.top80Rows.length > 0) {
+    highlights.push({
+      dimensao: "pergunta",
+      resumo: `${questionPareto.top80Rows.length} perguntas concentram cerca de 80% do impacto ponderado.`,
+    });
+  }
+  if (sectionPareto.rows[0]) {
+    highlights.push({
+      dimensao: "secao",
+      resumo: `A seção "${sectionPareto.rows[0].causa}" concentra o maior impacto de risco.`,
+    });
+  }
+  if (categoryPareto.rows[0]) {
+    highlights.push({
+      dimensao: "categoria",
+      resumo: `O tema "${categoryPareto.rows[0].causa}" é o principal driver de risco ponderado.`,
+    });
+  }
+  const widgets: DashboardWidget[] = [];
+  if (questionPareto.rows.length > 0) {
+    widgets.push({
+      id: "pareto-question-impact",
+      title: "Pareto de falhas por pergunta",
+      description: "Barras por impacto ponderado com curva acumulada e meta 80%.",
+      widgetType: "bar",
+      data: questionPareto.rows.map((row) => ({
+        causa: row.causa,
+        impacto: Number(row.impactoPonderado.toFixed(2)),
+        acumulado: Number(row.acumuladoPercentual.toFixed(2)),
+        alvo_80: 80,
+      })),
+      config: { xKey: "causa", yKey: "impacto", lineKey: "acumulado", thresholdKey: "alvo_80" },
+    });
+  }
+  return {
+    widgets,
+    ranking: combined,
+    highlights,
+    missingMessage: questionPareto.rows.length === 0 ? "Sem falhas suficientes para análise de Pareto." : undefined,
+  };
+}
+
+function mapParetoRowToDashboard(
+  row: ParetoRow,
+  dimensao: "pergunta" | "secao" | "categoria",
+): ParetoDashboard["ranking"][number] {
+  return {
+    dimensao,
+    causa: row.causa,
+    frequenciaFalhas: row.falhas,
+    impactoPonderado: row.impactoPonderado,
+    impactoPercentual: row.impactoPercentual,
+    impactoAcumulado: row.acumuladoPercentual,
+    pesoMedio: row.pesoMedio,
+    criticidade: row.criticidade,
+  };
 }
 
 function createInsights(
@@ -1599,7 +1776,9 @@ function createInsights(
       );
     }
 
-    const criticalFailures = qaItems.filter((item) => item.semanticResult === "real_failure" && (item.critical || item.weight >= 4)).length;
+    const criticalFailures = qaItems.filter(
+      (item) => item.semanticResult === "real_failure" && (item.critical || item.weight >= 3),
+    ).length;
     const failureRate =
       qaItems.filter((item) => item.semanticResult === "real_failure").length /
       Math.max(
@@ -1609,7 +1788,7 @@ function createInsights(
       );
     if (criticalFailures > 0 && failureRate < 0.2) {
       insights.push(
-        `Apesar da conformidade geral relativamente alta, foram identificadas ${criticalFailures} falhas críticas que exigem ação imediata.`,
+        `Apesar da conformidade geral relativamente alta, foram identificadas ${criticalFailures} falhas gravíssimas que exigem ação imediata.`,
       );
     } else {
       insights.push(
@@ -1631,7 +1810,7 @@ function createInsights(
       insights.push(
         `Apesar do ICS simples alto (${weightedSummary.icsSimple.toFixed(1)}%), o ICS ponderado cai para ${weightedSummary.icsWeighted.toFixed(
           1,
-        )}% devido à concentração de falhas críticas.`,
+        )}% devido à concentração de falhas gravíssimas.`,
       );
     }
 
@@ -1794,7 +1973,7 @@ function calculateWeightedSummaryFromQaItems(qaItems: QAItem[]): WeightedMetrics
   const sumApplicableWeight = applicable.reduce((sum, item) => sum + (item.weight ?? DEFAULT_WEIGHT), 0);
   const sumConformingWeight = conforming.reduce((sum, item) => sum + (item.weight ?? DEFAULT_WEIGHT), 0);
   const sumFailureWeight = failures.reduce((sum, item) => sum + (item.weight ?? DEFAULT_WEIGHT), 0);
-  const criticalFailures = failures.filter((item) => item.critical || (item.weight ?? DEFAULT_WEIGHT) >= 4).length;
+  const criticalFailures = failures.filter((item) => item.critical || (item.weight ?? DEFAULT_WEIGHT) >= 3).length;
   const recurrence = failures.length;
   const affectedSections = new Set(failures.map((item) => item.section || "Sem seção")).size;
   const themeWeightTotal = failures.reduce((sum, item) => sum + inferDefaultWeightByTheme(item.theme || "geral"), 0);
@@ -1828,7 +2007,7 @@ function calculateWeightedSummaryFromQaItems(qaItems: QAItem[]): WeightedMetrics
     weightedRiskClassification = "risco_interdicao";
   } else if (
     (icsWeighted >= 50 && icsWeighted < 75) ||
-    failures.some((item) => (item.weight ?? DEFAULT_WEIGHT) >= 3) ||
+    failures.some((item) => (item.weight ?? DEFAULT_WEIGHT) >= 2) ||
     failures.some((item) => /(higiene|document|armazen)/i.test(`${item.question} ${item.theme || ""}`))
   ) {
     weightedRiskClassification = "risco_multa";
@@ -1923,7 +2102,7 @@ function collectGroupStats(
     if (item.semanticResult === "real_failure") {
       current.failures += 1;
       current.weightedFailures += item.weight ?? DEFAULT_WEIGHT;
-      if (item.critical || (item.weight ?? 1) >= 4) {
+      if (item.critical || (item.weight ?? 1) >= 3) {
         current.criticalFailures += 1;
       }
     } else if (item.semanticResult === "non_failure") {
@@ -2040,6 +2219,7 @@ function buildCustomDashboards(args: {
     sanitaryPerformance: args.configInput?.visibleSections?.sanitaryPerformance ?? true,
     okr: args.configInput?.visibleSections?.okr ?? true,
     risk: args.configInput?.visibleSections?.risk ?? true,
+    pareto: args.configInput?.visibleSections?.pareto ?? true,
   };
   const merged: DashboardCustomizationConfig = {
     ...DEFAULT_DASHBOARD_CONFIG,
@@ -2187,20 +2367,12 @@ function buildCustomDashboards(args: {
     }
     const severity = new Map<string, number>([
       ["Leve", 0],
-      ["Moderada", 0],
       ["Grave", 0],
-      ["Critica", 0],
+      ["Gravíssimo", 0],
     ]);
     for (const item of weightedQaItems) {
       if (item.semanticResult !== "real_failure") continue;
-      const severityLabel =
-        (item.weight ?? 1) >= 5 || item.critical
-          ? "Critica"
-          : (item.weight ?? 1) >= 4
-            ? "Grave"
-            : (item.weight ?? 1) >= 2
-              ? "Moderada"
-              : "Leve";
+      const severityLabel = item.critical || (item.weight ?? 1) >= 3 ? "Gravíssimo" : (item.weight ?? 1) >= 2 ? "Grave" : "Leve";
       severity.set(severityLabel, (severity.get(severityLabel) ?? 0) + 1);
     }
     sanitaryWidgets.push({
@@ -2319,6 +2491,7 @@ function buildCustomDashboards(args: {
         config: { columns: ["pergunta", "frequencia_falha", "peso_medio", "impacto_ponderado"] },
       });
     }
+
   }
 
   const sanitaryPerformance = mergedVisibleSections.sanitaryPerformance
@@ -2328,6 +2501,16 @@ function buildCustomDashboards(args: {
           sanitaryWidgets.length === 0
             ? "Dados insuficientes para montar o dashboard de performance sanitária."
             : undefined,
+      }
+    : undefined;
+
+  const paretoData = buildParetoAnalysis(weightedQaItems);
+  const pareto = mergedVisibleSections.pareto
+    ? {
+        widgets: paretoData.widgets,
+        ranking: paretoData.ranking,
+        highlights: paretoData.highlights,
+        missingMessage: paretoData.missingMessage,
       }
     : undefined;
 
@@ -2436,6 +2619,7 @@ function buildCustomDashboards(args: {
     configApplied: merged,
     kpiOverview,
     sanitaryPerformance,
+    pareto,
     okr,
     risk,
     weightedComparison: {

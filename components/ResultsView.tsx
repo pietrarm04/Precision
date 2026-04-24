@@ -231,6 +231,30 @@ export function ResultsView({ result }: Props) {
         </div>
       )}
 
+      {custom?.pareto && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Pontos críticos (Pareto)</h3>
+          {custom.pareto.highlights.length > 0 && (
+            <ul style={{ margin: "0 0 10px", paddingLeft: 18, color: "var(--muted)" }}>
+              {custom.pareto.highlights.map((item, idx) => (
+                <li key={`${item.dimensao}-${idx}`}>{item.resumo}</li>
+              ))}
+            </ul>
+          )}
+          {custom.pareto.widgets.length > 0 ? (
+            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 10 }}>
+              {custom.pareto.widgets.map((widget) => (
+                <ChartRenderer key={widget.id} widget={widget} />
+              ))}
+            </div>
+          ) : (
+            <p style={{ margin: 0, color: "var(--muted)" }}>
+              {custom.pareto.missingMessage ?? "Sem dados suficientes para análise de Pareto."}
+            </p>
+          )}
+        </div>
+      )}
+
       {custom?.okr && (
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Dashboard de OKRs</h3>
