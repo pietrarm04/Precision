@@ -11,6 +11,7 @@ export function runAnalysisPipeline(
     mode?: "quick" | "reviewed";
     rules?: ManualReviewConfig;
     dashboardConfig?: DashboardCustomizationConfig;
+    debugMode?: boolean;
   },
 ): AnalysisResult {
   const parsed = parseTabularFile(fileName, bytes);
@@ -25,23 +26,25 @@ export function runAnalysisPipeline(
       datasetTypeConfidence: 0.2,
       rowCount: parsed.rows.length,
       columnCount: parsed.headers.length,
-      detectedColumns: parsed.headers,
+      detectedColumns: options?.debugMode ? parsed.headers : [],
       parsingDiagnostics: {
         partial: true,
-        warnings: parsed.warnings,
-        errors: parsed.errors,
+        warnings: options?.debugMode ? parsed.warnings : [],
+        errors: options?.debugMode ? parsed.errors : [],
       },
       structuralQuality: {
         score: 0.25,
         label: "baguncado",
         notes: warningMessage,
       },
-      columnProfiles: parsed.headers.map((header) => ({
-        name: header,
-        type: "empty",
-        missingCount: parsed.rows.length,
-        sampleValues: [],
-      })),
+      columnProfiles: options?.debugMode
+        ? parsed.headers.map((header) => ({
+            name: header,
+            type: "empty",
+            missingCount: parsed.rows.length,
+            sampleValues: [],
+          }))
+        : [],
       summaryCards: [
         { label: "Linhas", value: parsed.rows.length.toLocaleString("pt-BR") },
         { label: "Colunas", value: parsed.headers.length.toLocaleString("pt-BR") },
@@ -64,8 +67,8 @@ export function runAnalysisPipeline(
         "Analise parcial: o arquivo nao pode ser totalmente compreendido, mas o sistema retornou o melhor diagnostico estrutural disponivel.",
       interpretedPreview: parsed.rows.slice(0, 12),
       transparency: {
-        normalizationActions: [],
-        parsingWarnings: warningMessage,
+        normalizationActions: options?.debugMode ? [] : [],
+        parsingWarnings: options?.debugMode ? warningMessage : [],
         appliedRules: {
           mode: options?.mode ?? "quick",
           binaryInterpretationMode: options?.rules?.binaryInterpretationMode ?? "auto",

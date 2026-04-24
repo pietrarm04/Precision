@@ -165,6 +165,7 @@ export default function HomePage() {
         mode,
         rules: reviewRules,
         dashboardConfig,
+        debug: false,
       };
       const response = await fetch("/api/analyze", {
         method: "POST",

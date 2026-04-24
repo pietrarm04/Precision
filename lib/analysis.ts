@@ -1398,67 +1398,104 @@ function createInsights(
 ): string[] {
   const insights: string[] = [];
   const confidence = Math.round(confidenceFromScore(inference.confidence) * 100);
-  insights.push(
-    `O dataset foi classificado como ${inference.datasetType} com confianca de ${confidence}%, usando nomes de colunas e padroes de valores.`,
-  );
-
-  const missingRatio = calculateMissingRatio(dataset);
-  insights.push(
-    `A qualidade estrutural foi avaliada como ${structure.label}; cerca de ${Math.round(
-      missingRatio * 100,
-    )}% das celulas estao vazias.`,
-  );
-
-  const categorical = topCategoricalColumns(dataset, columnTypes);
-  if (categorical[0]) {
-    const dominance = dataset.rows.length ? (categorical[0].topCount / dataset.rows.length) * 100 : 0;
-    insights.push(
-      `Na coluna "${categorical[0].column}", o valor "${categorical[0].topValue}" concentra ${dominance.toFixed(
-        1,
-      )}% dos registros, indicando possivel dependencia de poucas categorias.`,
-    );
-  }
-
-  const numeric = numericProfiles(dataset, columnTypes);
-  if (numeric[0]) {
-    insights.push(
-      `A coluna numerica "${numeric[0].column}" apresenta media ${numeric[0].mean.toFixed(
-        2,
-      )} e amplitude ${numeric[0].range.toFixed(2)}, sugerindo ${numeric[0].range > numeric[0].mean * 2 ? "alta dispersao" : "dispersao moderada"}.`,
-    );
-  }
 
   if (qaItems.length > 0) {
-    const failures = qaItems.filter((item) => item.semanticResult === "real_failure").length;
-    const na = qaItems.filter((item) => item.semanticResult === "na").length;
-    insights.push(
-      `Na interpretacao de checklist/inspecao foram avaliados ${qaItems.length} itens, com ${(
-        (failures / Math.max(qaItems.length, 1)) *
-        100
-      ).toFixed(1)}% de falha real e ${((na / Math.max(qaItems.length, 1)) * 100).toFixed(1)}% de nao aplicavel.`,
+    const bySection = countBy(
+      qaItems
+        .filter((item) => item.semanticResult === "real_failure")
+        .map((item) => item.section || "Sem seção"),
     );
+    const topSection = topN(bySection, 1)[0];
+    if (topSection) {
+      insights.push(`As falhas estão concentradas em "${topSection[0]}", com ${topSection[1]} não conformidades.`);
+    }
+
+    const byGroup = collectGroupStats(qaItems, "loja");
+    if (byGroup.length >= 2) {
+      const sortedByIcs = [...byGroup].sort((a, b) => a.ics - b.ics);
+      const worst = sortedByIcs[0];
+      const best = sortedByIcs[sortedByIcs.length - 1];
+      insights.push(
+        `A unidade "${worst.group}" apresenta o menor nível de conformidade (${worst.ics.toFixed(1)}%), enquanto "${best.group}" lidera com ${best.ics.toFixed(1)}%.`,
+      );
+    }
+
+    const criticalFailures = qaItems.filter((item) => item.semanticResult === "real_failure" && (item.critical || item.weight >= 4)).length;
+    const failureRate =
+      qaItems.filter((item) => item.semanticResult === "real_failure").length /
+      Math.max(
+        qaItems.filter((item) => item.semanticResult === "real_failure" || item.semanticResult === "non_failure")
+          .length,
+        1,
+      );
+    if (criticalFailures > 0 && failureRate < 0.2) {
+      insights.push(
+        `Apesar da conformidade geral relativamente alta, foram identificadas ${criticalFailures} falhas críticas que exigem ação imediata.`,
+      );
+    } else {
+      insights.push(
+        `A taxa de não conformidade está em ${(failureRate * 100).toFixed(1)}%, refletindo o comportamento sanitário consolidado das inspeções.`,
+      );
+    }
+
+    const icsValues = collectGroupStats(qaItems, "setor").map((entry) => entry.ics);
+    if (icsValues.length > 1) {
+      const deviation = Math.sqrt(average(icsValues.map((value) => (value - average(icsValues)) ** 2)));
+      insights.push(
+        deviation < 8
+          ? "A baixa variabilidade do ICS indica padrão sanitário consistente entre áreas avaliadas."
+          : "A variabilidade elevada do ICS indica diferenças relevantes entre áreas e necessidade de padronização.",
+      );
+    }
+
     if (weightedIssues[0]) {
       insights.push(
-        `Considerando pesos e criticidade, a prioridade principal e "${weightedIssues[0].question}" com score ponderado ${weightedIssues[0].weightedScore.toFixed(
+        `A principal prioridade operacional é "${weightedIssues[0].question}", que combina recorrência e criticidade acima dos demais itens.`,
+      );
+    }
+  } else {
+    insights.push(
+      `O dataset foi classificado como ${inference.datasetType} com confiança de ${confidence}%.`,
+    );
+    const categorical = topCategoricalColumns(dataset, columnTypes);
+    if (categorical[0]) {
+      const dominance = dataset.rows.length ? (categorical[0].topCount / dataset.rows.length) * 100 : 0;
+      insights.push(
+        `Há concentração relevante em "${categorical[0].column}", onde o principal grupo responde por ${dominance.toFixed(
+          1,
+        )}% dos registros.`,
+      );
+    }
+    const numeric = numericProfiles(dataset, columnTypes);
+    if (numeric[0]) {
+      insights.push(
+        `A métrica "${numeric[0].column}" apresenta média ${numeric[0].mean.toFixed(2)} e amplitude ${numeric[0].range.toFixed(
           2,
-        )}.`,
+        )}, indicando ${numeric[0].range > numeric[0].mean * 2 ? "alta oscilação" : "comportamento estável"}.`,
       );
     }
   }
 
-  if (dashboardMeta.rendered === 0) {
+  const missingRatio = calculateMissingRatio(dataset);
+  if (structure.score < 0.6 || missingRatio > 0.3) {
     insights.push(
-      "Os dashboards foram reduzidos ao minimo porque os dados atuais nao sustentam comparacoes confiaveis.",
+      `A qualidade estrutural foi classificada como ${structure.label}; recomenda-se cautela porque ${Math.round(
+        missingRatio * 100,
+      )}% dos campos estão vazios.`,
     );
+  }
+
+  if (dashboardMeta.rendered === 0) {
+    insights.push("Os dashboards foram reduzidos ao essencial por falta de base confiável para comparações executivas.");
   } else if (dashboardMeta.rendered < dashboardMeta.attempted) {
     insights.push(
-      `Foram priorizados ${dashboardMeta.rendered} dashboards de maior utilidade para evitar graficos de baixa confiabilidade.`,
+      `Foram exibidos apenas ${dashboardMeta.rendered} dashboards de maior valor para evitar visualizações pouco acionáveis.`,
     );
   }
 
   while (insights.length < 5) {
     insights.push(
-      "A analise manteve postura conservadora: quando a confianca da inferencia e baixa, os resultados sao apresentados como indicativos e nao conclusivos.",
+      "A análise priorizou conclusões objetivas e acionáveis para apoiar decisões operacionais sanitárias.",
     );
   }
 
@@ -1983,6 +2020,7 @@ export function analyzeDataset(
   inference: DatasetTypeInference,
   reviewConfig?: ManualReviewConfig,
   dashboardConfigInput?: DashboardCustomizationConfig,
+  debugMode = false,
 ): AnalysisResult {
   const columnTypes = detectColumnTypes(normalized);
   const structure = structuralQuality(normalized);
@@ -2078,28 +2116,38 @@ export function analyzeDataset(
     rowCount: normalized.rows.length,
     columnCount: normalized.headers.length,
     detectedColumns: normalized.headers,
-    parsingDiagnostics: {
-      partial: parsed.errors.length > 0 || parsed.warnings.length > 0,
-      warnings: parsed.warnings,
-      errors: parsed.errors,
-    },
+    parsingDiagnostics:
+      debugMode
+        ? {
+            partial: parsed.errors.length > 0 || parsed.warnings.length > 0,
+            warnings: parsed.warnings,
+            errors: parsed.errors,
+          }
+        : {
+            partial: false,
+            warnings: [],
+            errors: [],
+          },
     structuralQuality: {
       score: structure.score,
       label: structure.label,
       notes: structure.notes,
     },
-    columnProfiles: normalized.headers.map((header) => ({
-      name: header,
-      type: columnTypes[header],
-      missingCount: normalized.rows.reduce(
-        (sum, row) => sum + (isMissing(row[header]) ? 1 : 0),
-        0,
-      ),
-      sampleValues: normalized.rows
-        .map((row) => toStringValue(row[header]))
-        .filter((value) => value.length > 0)
-        .slice(0, 5),
-    })),
+    columnProfiles:
+      debugMode
+        ? normalized.headers.map((header) => ({
+            name: header,
+            type: columnTypes[header],
+            missingCount: normalized.rows.reduce(
+              (sum, row) => sum + (isMissing(row[header]) ? 1 : 0),
+              0,
+            ),
+            sampleValues: normalized.rows
+              .map((row) => toStringValue(row[header]))
+              .filter((value) => value.length > 0)
+              .slice(0, 5),
+          }))
+        : [],
     summaryCards,
     dashboardWidgets: widgets,
     insights,

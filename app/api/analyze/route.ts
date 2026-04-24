@@ -51,7 +51,20 @@ const kpiKeySchema = z.enum([
 const dashboardConfigSchema = z.object({
   selectedKpis: z.array(kpiKeySchema).default([]),
   grouping: z.enum(["loja", "setor", "template", "periodo"]).default("loja"),
-  kpiTargets: z.record(kpiKeySchema, z.number()).optional(),
+  kpiTargets: z
+    .object({
+      ics_medio: z.number().optional(),
+      ics_minimo: z.number().optional(),
+      ics_maximo: z.number().optional(),
+      desvio_padrao_ics: z.number().optional(),
+      total_nao_conformidades: z.number().optional(),
+      nao_conformidades_criticas: z.number().optional(),
+      percentual_nao_conformidade: z.number().optional(),
+      percentual_nao_aplicavel: z.number().optional(),
+      score_medio: z.number().optional(),
+      quantidade_inspecoes: z.number().optional(),
+    })
+    .optional(),
   visibleSections: z
     .object({
       kpiOverview: z.boolean().default(true),
@@ -84,6 +97,7 @@ const requestSchema = z.object({
   mode: z.enum(["quick", "reviewed"]).default("quick"),
   rules: reviewSchema.optional(),
   dashboardConfig: dashboardConfigSchema.optional(),
+  debugMode: z.boolean().optional(),
 });
 
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {
@@ -142,6 +156,7 @@ export async function POST(request: Request) {
       mode: payload.mode,
       rules: payload.rules,
       dashboardConfig,
+      debugMode: payload.debugMode,
     });
     return NextResponse.json(result);
   } catch (error) {

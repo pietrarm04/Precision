@@ -100,6 +100,7 @@ export interface OkrInput {
 export interface DashboardCustomizationConfig {
   selectedKpis: KpiKey[];
   grouping: DashboardGrouping;
+  debugMode?: boolean;
   kpiTargets?: Partial<Record<KpiKey, number>>;
   visibleSections?: {
     kpiOverview: boolean;
@@ -147,6 +148,10 @@ export interface SourceScoreSummary {
 }
 
 export interface AnalysisResult {
+  debugMode?: boolean;
+  analysisDebug?: {
+    debugMode: boolean;
+  };
   datasetType: DatasetType;
   datasetTypeConfidence: number;
   rowCount: number;
@@ -260,4 +265,5 @@ export interface AnalyzeRequestPayload {
   mode: "quick" | "reviewed";
   rules?: ManualReviewConfig;
   dashboardConfig?: DashboardCustomizationConfig;
+  debugMode?: boolean;
 }

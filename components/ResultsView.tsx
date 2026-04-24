@@ -18,6 +18,7 @@ export function ResultsView({ result }: Props) {
   const q = qualityPill(result.structuralQuality.score);
   const sourceScore = result.sourceScore ?? result.qaAnalysis?.sourceScore;
   const custom = result.customDashboards;
+  const isDebugMode = Boolean(result.debugMode);
   const complianceText = sourceScore
     ? `${sourceScore.compliancePercentage.toFixed(sourceScore.isMaxScore ? 0 : 1)}% de conformidade`
     : null;
@@ -301,7 +302,7 @@ export function ResultsView({ result }: Props) {
           <li>Pesos por secao: {result.transparency.appliedRules.sectionWeights}</li>
           <li>Observacao: {result.transparency.appliedRules.notes || "sem observacoes"}</li>
         </ul>
-        {result.transparency.parsingWarnings.length > 0 && (
+        {isDebugMode && result.transparency.parsingWarnings.length > 0 && (
           <>
             <h4 style={{ marginBottom: 6 }}>Avisos de parsing</h4>
             <ul style={{ margin: 0, paddingLeft: 18 }}>
