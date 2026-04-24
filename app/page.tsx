@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { RuleReviewPanel } from "@/components/RuleReviewPanel";
 import { ResultsView } from "@/components/ResultsView";
+import { buildMultiUnitAnalysis } from "@/lib/multi-unit";
 import {
   AnalysisResult,
   DashboardCustomizationConfig,
@@ -25,9 +26,6 @@ async function fileToBase64(file: File): Promise<string> {
   });
 }
 
-function assertValidFile(file: File | null): file is File {
-  return isValidTabularFile(file);
-}
 function createDefaultRules(result: AnalysisResult): ManualReviewConfig {
   return {
     mode: "reviewed",
@@ -94,8 +92,37 @@ function createDefaultDashboardConfig(): DashboardCustomizationConfig {
   };
 }
 
+type UploadedUnit = {
+  id: string;
+  file: File;
+  unitLabel: string;
+  includeInComparison: boolean;
+};
+
+function fileFingerprint(file: File): string {
+  return `${file.name}__${file.size}__${file.lastModified}`;
+}
+
+function defaultUnitLabel(fileName: string): string {
+  return fileName
+    .replace(/\.[^/.]+$/g, "")
+    .replace(/[_\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function makeUploadedUnit(file: File): UploadedUnit {
+  const entropy = `${Math.random()}`.slice(2, 10);
+  return {
+    id: `${fileFingerprint(file)}__${entropy}`,
+    file,
+    unitLabel: defaultUnitLabel(file.name),
+    includeInComparison: true,
+  };
+}
+
 export default function HomePage() {
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploadedUnits, setUploadedUnits] = useState<UploadedUnit[]>([]);
   const [quickMode, setQuickMode] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,16 +134,25 @@ export default function HomePage() {
   const [sampleFiles, setSampleFiles] = useState<string[]>([]);
   const [selectedSample, setSelectedSample] = useState<string>("");
   const [sampleLoading, setSampleLoading] = useState(false);
+  const [processingProgress, setProcessingProgress] = useState<{ current: number; total: number } | null>(
+    null,
+  );
   const [dashboardConfig, setDashboardConfig] = useState<DashboardCustomizationConfig>(
     createDefaultDashboardConfig(),
   );
 
+  const processableUnits = uploadedUnits.filter(
+    (item) => item.includeInComparison && isValidTabularFile(item.file),
+  );
+  const hasAnyProcessableFile = processableUnits.length > 0;
+
   const fileInfo = useMemo(() => {
-    if (!selectedFile) {
+    if (uploadedUnits.length === 0) {
       return null;
     }
-    return `${selectedFile.name} · ${(selectedFile.size / 1024).toFixed(1)} KB`;
-  }, [selectedFile]);
+    const totalKb = uploadedUnits.reduce((sum, item) => sum + item.file.size / 1024, 0);
+    return `${uploadedUnits.length} arquivo(s) selecionado(s) · ${totalKb.toFixed(1)} KB`;
+  }, [uploadedUnits]);
 
   async function runAnalysis(mode: "quick" | "reviewed", reviewRules?: ManualReviewConfig) {
     // #region agent log
@@ -126,13 +162,14 @@ export default function HomePage() {
       message: "runAnalysis invoked",
       data: {
         mode,
-        hasSelectedFile: Boolean(selectedFile),
+        selectedUnits: uploadedUnits.length,
+        processableUnits: processableUnits.length,
         loading,
       },
       timestamp: Date.now(),
     });
     // #endregion
-    if (!assertValidFile(selectedFile)) {
+    if (!hasAnyProcessableFile) {
       // #region agent log
       appendClientDebugLog({
         hypothesisId: "C",
@@ -142,49 +179,79 @@ export default function HomePage() {
         timestamp: Date.now(),
       });
       // #endregion
-      setError("Selecione um arquivo CSV, XLSX ou XLS antes de iniciar a analise.");
+      setError("Selecione ao menos um arquivo CSV, XLSX ou XLS para processar.");
       return;
     }
     setLoading(true);
     setError(null);
     setDebugJson(null);
     try {
-      const fileBase64 = await fileToBase64(selectedFile);
-      // #region agent log
-      appendClientDebugLog({
-        hypothesisId: "C",
-        location: "app/page.tsx:runAnalysis-before-fetch",
-        message: "Prepared payload for /api/analyze",
-        data: {
-          mode,
-          fileSize: selectedFile.size,
-          fileType: selectedFile.type || "unknown",
-          base64Length: fileBase64.length,
-        },
-        timestamp: Date.now(),
-      });
-      // #endregion
-      const payload = {
-        fileName: selectedFile.name,
-        fileBase64,
-        mode,
-        rules: reviewRules,
-        dashboardConfig,
-        debugMode: false,
-      };
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = (await response.json()) as AnalysisResult & { error?: string; message?: string };
-      if (!response.ok) {
-        throw new Error(data.error ?? data.message ?? "Erro ao processar arquivo.");
+      const total = processableUnits.length;
+      setProcessingProgress({ current: 0, total });
+      const unitResults: Array<{
+        unitId: string;
+        fileName: string;
+        unitLabel: string;
+        analysis: AnalysisResult;
+      }> = [];
+      const unitErrors: Array<{ fileName: string; unitLabel?: string; message: string }> = [];
+
+      for (let index = 0; index < processableUnits.length; index += 1) {
+        const unit = processableUnits[index];
+        setProcessingProgress({ current: index + 1, total });
+        try {
+          const analysis = await runSingleAnalysis(unit, mode, reviewRules);
+          unitResults.push({
+            unitId: unit.id,
+            fileName: unit.file.name,
+            unitLabel: unit.unitLabel.trim(),
+            analysis,
+          });
+        } catch (unitError) {
+          unitErrors.push({
+            fileName: unit.file.name,
+            unitLabel: unit.unitLabel.trim() || undefined,
+            message: unitError instanceof Error ? unitError.message : "Falha ao processar arquivo.",
+          });
+        }
       }
-      setResult(data);
-      setDebugJson(JSON.stringify(data, null, 2));
+
+      if (unitResults.length === 0) {
+        const firstError = unitErrors[0]?.message ?? "Nao foi possivel concluir a analise.";
+        throw new Error(firstError);
+      }
+
+      const baseResult = unitResults[0].analysis;
+      const multiUnit =
+        unitResults.length > 1
+          ? buildMultiUnitAnalysis({
+              units: unitResults.map((item) => ({
+                unitId: item.unitId,
+                fileName: item.fileName,
+                userLabel: item.unitLabel || undefined,
+                analysis: item.analysis,
+              })),
+              grouping:
+                dashboardConfig.grouping === "setor" || dashboardConfig.grouping === "loja"
+                  ? dashboardConfig.grouping
+                  : "loja",
+              totalFiles: uploadedUnits.length,
+              includeUnitPareto: false,
+              errors: unitErrors,
+            })
+          : undefined;
+
+      const nextResult: AnalysisResult = {
+        ...baseResult,
+        multiUnit,
+      };
+      setResult(nextResult);
+      setDebugJson(JSON.stringify(nextResult, null, 2));
       if (mode === "reviewed") {
-        setRules(reviewRules ?? createDefaultRules(data));
+        setRules(reviewRules ?? createDefaultRules(baseResult));
+      }
+      if (unitErrors.length > 0) {
+        setError(`${unitErrors.length} arquivo(s) não puderam ser processados. A comparação foi gerada com os demais.`);
       }
     } catch (analysisError) {
       setResult(null);
@@ -196,6 +263,7 @@ export default function HomePage() {
       );
     } finally {
       setLoading(false);
+      setProcessingProgress(null);
     }
   }
 
@@ -206,15 +274,15 @@ export default function HomePage() {
       location: "app/page.tsx:state-effect",
       message: "State snapshot updated",
       data: {
-        hasSelectedFile: Boolean(selectedFile),
-        selectedFileSize: selectedFile?.size ?? null,
+        hasSelectedFile: hasAnyProcessableFile,
+        selectedFileSize: uploadedUnits[0]?.file.size ?? null,
         loading,
-        derivedDisabled: !selectedFile || loading,
+        derivedDisabled: !hasAnyProcessableFile || loading,
       },
       timestamp: Date.now(),
     });
     // #endregion
-  }, [selectedFile, loading, dashboardConfig]);
+  }, [uploadedUnits, hasAnyProcessableFile, loading, dashboardConfig]);
 
   useEffect(() => {
     async function loadSampleFiles() {
@@ -246,6 +314,36 @@ export default function HomePage() {
     return buffer;
   }
 
+  async function runSingleAnalysis(
+    input: UploadedUnit,
+    mode: "quick" | "reviewed",
+    reviewRules?: ManualReviewConfig,
+  ): Promise<AnalysisResult> {
+    const fileBase64 = await fileToBase64(input.file);
+    const payload = {
+      fileName: input.file.name,
+      fileBase64,
+      mode,
+      rules: reviewRules,
+      dashboardConfig,
+      grouping:
+        dashboardConfig.grouping === "setor" || dashboardConfig.grouping === "loja"
+          ? dashboardConfig.grouping
+          : "loja",
+      debugMode: false,
+    };
+    const response = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = (await response.json()) as AnalysisResult & { error?: string; message?: string };
+    if (!response.ok) {
+      throw new Error(data.error ?? data.message ?? `Erro ao processar ${input.file.name}.`);
+    }
+    return data;
+  }
+
   async function loadSampleFile() {
     if (!selectedSample) {
       return;
@@ -266,10 +364,20 @@ export default function HomePage() {
       const file = new File([decodeBase64(data.fileBase64)], data.fileName, {
         type: data.mimeType ?? "application/octet-stream",
       });
-      setSelectedFile(file);
+      setUploadedUnits((prev) => {
+        const unit = makeUploadedUnit(file);
+        const next = [...prev, unit];
+        const byFingerprint = new Map<string, UploadedUnit>();
+        for (const item of next) {
+          byFingerprint.set(fileFingerprint(item.file), item);
+        }
+        return [...byFingerprint.values()];
+      });
       setResult(null);
+      setDebugJson(null);
       setRules(null);
       setSummaryText(null);
+      setDashboardConfig(createDefaultDashboardConfig());
     } catch (sampleError) {
       setError(sampleError instanceof Error ? sampleError.message : "Falha ao carregar exemplo.");
     } finally {
@@ -322,41 +430,48 @@ export default function HomePage() {
         </p>
         <input
           type="file"
+          multiple
           accept=".csv,.xlsx,.xls"
           onChange={(event) => {
-            const files = event.currentTarget.files;
-            const file = files?.[0] ?? null;
+            const fileList = event.currentTarget.files;
+            const files = fileList ? Array.from(fileList) : [];
             // #region agent log
             appendClientDebugLog({
               hypothesisId: "B",
               location: "app/page.tsx:file-input-onChange",
               message: "File input changed",
               data: {
-                fileCount: files?.length ?? 0,
-                selectedFileSize: file?.size ?? null,
-                selectedFileType: file?.type ?? "none",
+                fileCount: files.length,
+                totalSize: files.reduce((acc, file) => acc + file.size, 0),
               },
               timestamp: Date.now(),
             });
             // #endregion
-            if (!file) {
+            if (files.length === 0) {
               setError(
                 "Nenhum arquivo foi selecionado. Se estiver em ambiente remoto, escolha um arquivo local do computador ou use o carregamento de exemplo.",
               );
               return;
             }
-            if (file && !isValidTabularFile(file)) {
-              setSelectedFile(null);
+            const invalid = files.find((file) => !isValidTabularFile(file));
+            if (invalid) {
               setError("Arquivo invalido. Envie apenas CSV, XLSX ou XLS.");
               return;
             }
-            setSelectedFile(file);
+            setUploadedUnits((prev) => {
+              const existing = new Set(prev.map((item) => fileFingerprint(item.file)));
+              const additions = files
+                .filter((file) => !existing.has(fileFingerprint(file)))
+                .map((file) => makeUploadedUnit(file));
+              return [...prev, ...additions];
+            });
             setResult(null);
             setDebugJson(null);
             setRules(null);
             setSummaryText(null);
             setDashboardConfig(createDefaultDashboardConfig());
             setError(null);
+            event.currentTarget.value = "";
           }}
         />
         <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
@@ -391,7 +506,78 @@ export default function HomePage() {
             </div>
           </div>
         )}
-        {fileInfo && <div style={{ color: "var(--muted)" }}>{fileInfo}</div>}
+        {fileInfo && (
+          <div style={{ color: "var(--muted)", display: "flex", justifyContent: "space-between", gap: 8 }}>
+            <span>{fileInfo}</span>
+            <span>{processableUnits.length} marcado(s) para comparação</span>
+          </div>
+        )}
+        {uploadedUnits.length > 0 && (
+          <div className="card" style={{ padding: 12, display: "grid", gap: 10 }}>
+            <strong>Arquivos carregados</strong>
+            <div style={{ display: "grid", gap: 8, maxHeight: 260, overflow: "auto" }}>
+              {uploadedUnits.map((unit) => (
+                <div
+                  key={unit.id}
+                  className="card"
+                  style={{
+                    padding: 10,
+                    display: "grid",
+                    gridTemplateColumns: "auto minmax(180px, 1fr) auto auto",
+                    gap: 8,
+                    alignItems: "center",
+                  }}
+                >
+                  <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={unit.includeInComparison}
+                      onChange={(event) =>
+                        setUploadedUnits((prev) =>
+                          prev.map((item) =>
+                            item.id === unit.id ? { ...item, includeInComparison: event.target.checked } : item,
+                          ),
+                        )
+                      }
+                      style={{ width: "auto" }}
+                    />
+                    Comparar
+                  </label>
+                  <label style={{ margin: 0 }}>
+                    <span style={{ display: "block", fontSize: 12, color: "var(--muted)" }}>{unit.file.name}</span>
+                    <input
+                      type="text"
+                      value={unit.unitLabel}
+                      onChange={(event) =>
+                        setUploadedUnits((prev) =>
+                          prev.map((item) =>
+                            item.id === unit.id ? { ...item, unitLabel: event.target.value } : item,
+                          ),
+                        )
+                      }
+                      placeholder="Nome da unidade"
+                    />
+                  </label>
+                  <span style={{ color: "var(--muted)", fontSize: 12 }}>
+                    {(unit.file.size / 1024).toFixed(1)} KB
+                  </span>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={() =>
+                      setUploadedUnits((prev) => prev.filter((item) => item.id !== unit.id))
+                    }
+                  >
+                    Remover
+                  </button>
+                </div>
+              ))}
+            </div>
+            <p style={{ margin: 0, color: "var(--muted)", fontSize: 12 }}>
+              Suporta 15 a 30+ arquivos. Todos são processados de forma independente antes da comparação.
+            </p>
+          </div>
+        )}
         <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <label className="card" style={{ padding: 12 }}>
             <input
@@ -924,7 +1110,7 @@ export default function HomePage() {
             className="btn"
             onClick={() => {
               const mode = quickMode ? "quick" : "reviewed";
-              const derivedDisabled = !isValidTabularFile(selectedFile) || loading;
+              const derivedDisabled = !hasAnyProcessableFile || loading;
               // #region agent log
               appendClientDebugLog({
                 hypothesisId: "D",
@@ -932,7 +1118,8 @@ export default function HomePage() {
                 message: "Process button click received",
                 data: {
                   mode,
-                  hasSelectedFile: Boolean(selectedFile),
+                  selectedCount: uploadedUnits.length,
+                  processableCount: processableUnits.length,
                   loading,
                   derivedDisabled,
                 },
@@ -944,12 +1131,18 @@ export default function HomePage() {
               }
               void runAnalysis(mode, quickMode ? undefined : rules ?? undefined);
             }}
-            disabled={!isValidTabularFile(selectedFile) || loading}
+            disabled={!hasAnyProcessableFile || loading}
           >
-            {loading ? "Processando..." : "Processar arquivo"}
+            {loading
+              ? `Processando ${processingProgress?.current ?? 0} de ${processingProgress?.total ?? processableUnits.length} arquivos...`
+              : "Processar arquivos"}
           </button>
         </div>
-        {loading && <div className="pill">Processando arquivo e aguardando resposta da API...</div>}
+        {loading && (
+          <div className="pill">
+            Processando {processingProgress?.current ?? 0} de {processingProgress?.total ?? processableUnits.length} arquivos...
+          </div>
+        )}
         {error && (
           <div className="pill danger" style={{ width: "fit-content" }}>
             {error}

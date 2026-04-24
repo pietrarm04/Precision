@@ -183,6 +183,72 @@ export interface WeightedMetricsSummary {
   weightSourceBreakdown: Record<WeightSource, number>;
 }
 
+export interface MultiUnitComparisonRow {
+  unitId: string;
+  fileName: string;
+  unitName: string;
+  userLabel?: string;
+  icsSimple: number;
+  icsWeighted: number;
+  totalFailures: number;
+  weightedFailures: number;
+  criticalFailures: number;
+  weightedRiskScore: number;
+  riskLevel: WeightedRiskLevel;
+  failureRatePercentage: number;
+}
+
+export interface MultiUnitParetoRow {
+  causa: string;
+  frequenciaFalhas: number;
+  impactoPonderado: number;
+  impactoPercentual: number;
+  impactoAcumulado: number;
+}
+
+export interface MultiUnitAnalysisResult {
+  grouping: "loja" | "setor";
+  totalFiles: number;
+  comparedFiles: number;
+  comparisonTable: MultiUnitComparisonRow[];
+  ranking: MultiUnitComparisonRow[];
+  bestWorst: {
+    bestUnit?: string;
+    worstUnit?: string;
+    highestRiskUnit?: string;
+    highestVariationUnit?: string;
+    icsWeightedStdDev: number;
+  };
+  riskDistribution: Array<{
+    level: WeightedRiskLevel;
+    label: string;
+    count: number;
+  }>;
+  widgets: DashboardWidget[];
+  globalPareto: {
+    ranking: MultiUnitParetoRow[];
+    widgets: DashboardWidget[];
+  };
+  perUnitPareto?: Array<{
+    unitName: string;
+    ranking: MultiUnitParetoRow[];
+  }>;
+  insights: string[];
+  errors: Array<{
+    fileName: string;
+    unitLabel?: string;
+    message: string;
+  }>;
+}
+
+export interface MultiAnalyzeFileInput {
+  id?: string;
+  fileName: string;
+  fileBase64: string;
+  unitLabel?: string;
+  includeInComparison?: boolean;
+}
+
 export interface AnalysisResult {
   debugMode?: boolean;
   analysisDebug?: {
@@ -247,6 +313,7 @@ export interface AnalysisResult {
     weightedIssues: WeightedIssue[];
     ambiguousQuestions: ManualQuestionOverride[];
   };
+  multiUnit?: MultiUnitAnalysisResult;
   customDashboards?: {
     configApplied: DashboardCustomizationConfig;
     kpiOverview?: {
@@ -352,8 +419,11 @@ export interface AnalysisResult {
 export interface AnalyzeRequestPayload {
   fileName: string;
   fileBase64: string;
+  files?: MultiAnalyzeFileInput[];
   mode: "quick" | "reviewed";
   rules?: ManualReviewConfig;
   dashboardConfig?: DashboardCustomizationConfig;
+  grouping?: "loja" | "setor";
+  includeUnitPareto?: boolean;
   debugMode?: boolean;
 }

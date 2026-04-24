@@ -96,6 +96,7 @@ const dashboardConfigSchema = z.object({
       sanitaryPerformance: z.boolean().default(true),
       okr: z.boolean().default(true),
       risk: z.boolean().default(true),
+      pareto: z.boolean().default(true),
     })
     .optional(),
   okrs: z

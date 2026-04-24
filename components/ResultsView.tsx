@@ -14,10 +14,18 @@ function qualityPill(score: number): { text: string; cls: string } {
   return { text: "Estrutura estavel", cls: "pill success" };
 }
 
+function riskLabel(level: "regular" | "atencao" | "risco_multa" | "risco_interdicao"): string {
+  if (level === "risco_interdicao") return "Risco de interdição";
+  if (level === "risco_multa") return "Risco de multa";
+  if (level === "atencao") return "Atenção";
+  return "Regular";
+}
+
 export function ResultsView({ result }: Props) {
   const q = qualityPill(result.structuralQuality.score);
   const sourceScore = result.sourceScore ?? result.qaAnalysis?.sourceScore;
   const custom = result.customDashboards;
+  const multi = result.multiUnit;
   const isDebugMode = Boolean(result.debugMode);
   const complianceText = sourceScore
     ? `${sourceScore.compliancePercentage.toFixed(sourceScore.isMaxScore ? 0 : 1)}% de conformidade`
@@ -331,6 +339,140 @@ export function ResultsView({ result }: Props) {
             <p style={{ margin: 0, color: "var(--muted)" }}>
               {custom.okr.missingMessage ?? "Nenhum OKR disponível para visualização."}
             </p>
+          )}
+        </div>
+      )}
+
+      {multi && (
+        <div className="card" style={{ display: "grid", gap: 12 }}>
+          <h3 style={{ marginTop: 0, marginBottom: 0 }}>Comparação multi-unidade</h3>
+          <p style={{ margin: 0, color: "var(--muted)" }}>
+            {multi.comparedFiles} de {multi.totalFiles} arquivo(s) comparado(s), agrupamento por{" "}
+            <strong>{multi.grouping}</strong>.
+          </p>
+
+          <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
+            <div className="card" style={{ padding: 12 }}>
+              <strong>Melhor unidade</strong>
+              <div style={{ marginTop: 6, color: "var(--success)", fontWeight: 700 }}>
+                {multi.bestWorst.bestUnit ?? "N/A"}
+              </div>
+            </div>
+            <div className="card" style={{ padding: 12 }}>
+              <strong>Pior unidade</strong>
+              <div style={{ marginTop: 6, color: "var(--danger)", fontWeight: 700 }}>
+                {multi.bestWorst.worstUnit ?? "N/A"}
+              </div>
+            </div>
+            <div className="card" style={{ padding: 12 }}>
+              <strong>Maior risco</strong>
+              <div style={{ marginTop: 6, fontWeight: 700 }}>{multi.bestWorst.highestRiskUnit ?? "N/A"}</div>
+            </div>
+            <div className="card" style={{ padding: 12 }}>
+              <strong>Maior variação</strong>
+              <div style={{ marginTop: 6, fontWeight: 700 }}>
+                {multi.bestWorst.highestVariationUnit ?? "N/A"} ({multi.bestWorst.icsWeightedStdDev.toFixed(2)} dp)
+              </div>
+            </div>
+          </div>
+
+          <div style={{ maxHeight: 320, overflow: "auto" }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Unidade</th>
+                  <th>ICS</th>
+                  <th>ICS ponderado</th>
+                  <th>Falhas totais</th>
+                  <th>Falhas gravíssimas</th>
+                  <th>Risco</th>
+                </tr>
+              </thead>
+              <tbody>
+                {multi.comparisonTable.map((row) => {
+                  const isBest = row.unitName === multi.bestWorst.bestUnit;
+                  const isWorst = row.unitName === multi.bestWorst.worstUnit;
+                  return (
+                    <tr
+                      key={`${row.unitId}-comparison`}
+                      style={{
+                        background: isBest
+                          ? "rgba(80, 216, 144, 0.12)"
+                          : isWorst
+                            ? "rgba(255, 107, 122, 0.12)"
+                            : "transparent",
+                      }}
+                    >
+                      <td>{row.unitName}</td>
+                      <td>{row.icsSimple.toFixed(2)}%</td>
+                      <td>{row.icsWeighted.toFixed(2)}%</td>
+                      <td>{row.totalFailures}</td>
+                      <td>{row.criticalFailures}</td>
+                      <td>{riskLabel(row.riskLevel)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ maxHeight: 260, overflow: "auto" }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Ranking geral</th>
+                  <th>Score risco</th>
+                  <th>Falhas ponderadas</th>
+                  <th>ICS ponderado</th>
+                  <th>Gravíssimas</th>
+                </tr>
+              </thead>
+              <tbody>
+                {multi.ranking.map((row, idx) => (
+                  <tr key={`${row.unitId}-ranking`}>
+                    <td>{idx + 1}</td>
+                    <td>{row.unitName}</td>
+                    <td>{row.weightedRiskScore.toFixed(2)}</td>
+                    <td>{row.weightedFailures.toFixed(2)}</td>
+                    <td>{row.icsWeighted.toFixed(2)}%</td>
+                    <td>{row.criticalFailures}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {multi.widgets.length > 0 && (
+            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 10 }}>
+              {multi.widgets.map((widget) => (
+                <ChartRenderer key={widget.id} widget={widget} />
+              ))}
+            </div>
+          )}
+
+          {multi.insights.length > 0 && (
+            <div className="card" style={{ padding: 12 }}>
+              <strong>Insights comparativos</strong>
+              <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+                {multi.insights.map((insight, idx) => (
+                  <li key={`${insight}-${idx}`}>{insight}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {multi.errors.length > 0 && (
+            <div className="card" style={{ padding: 12 }}>
+              <strong>Arquivos com falha de processamento parcial</strong>
+              <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+                {multi.errors.map((item, idx) => (
+                  <li key={`${item.fileName}-${idx}`}>
+                    {item.unitLabel ?? item.fileName}: {item.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
       )}
