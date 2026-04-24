@@ -59,6 +59,10 @@ function appendClientDebugLog(payload: {
   // #endregion
 }
 
+function getClientTimestamp(): number {
+  return Date.now();
+}
+
 const KPI_OPTIONS: Array<{ key: KpiKey; label: string }> = [
   { key: "ics_medio", label: "ICS médio" },
   { key: "ics_minimo", label: "ICS mínimo" },
@@ -166,7 +170,7 @@ export default function HomePage() {
         processableUnits: processableUnits.length,
         loading,
       },
-      timestamp: Date.now(),
+      timestamp: getClientTimestamp(),
     });
     // #endregion
     if (!hasAnyProcessableFile) {
@@ -176,7 +180,7 @@ export default function HomePage() {
         location: "app/page.tsx:runAnalysis-no-file-branch",
         message: "runAnalysis exited without selected file",
         data: { mode, loading },
-        timestamp: Date.now(),
+        timestamp: getClientTimestamp(),
       });
       // #endregion
       setError("Selecione ao menos um arquivo CSV, XLSX ou XLS para processar.");
