@@ -70,6 +70,58 @@ const yesTokens = ["sim", "yes", "y", "true", "1"];
 const noTokens = ["nao", "não", "no", "n", "false", "0"];
 
 const defaultIgnoredRegex = /(coment[aá]rio|evid[eê]ncia|foto|anexo|assinatura|observa[cç][aã]o)/i;
+const inspectionColumnPrefixPattern = /^inspection[_\s]+/i;
+const inspectionQuestionNoiseTokens = new Set([
+  "question",
+  "pergunta",
+  "item",
+  "checkpoint",
+  "criteria",
+  "criterio",
+  "section",
+  "secao",
+  "seção",
+  "category",
+  "categoria",
+  "topic",
+  "area",
+]);
+const inspectionMetadataTokens = [
+  "auditid",
+  "auditname",
+  "templateid",
+  "templatename",
+  "author",
+  "owner",
+  "start",
+  "lastupdate",
+  "completed",
+  "score",
+  "totalscore",
+  "nome fantasia",
+  "razao social",
+  "cnpj",
+  "loja passivel de multa",
+  "loja passivel de interdicao",
+  "classificacao sanitaria da loja",
+  "nivel de risco sanitario",
+  "necessita acao imediata",
+];
+const explicitNegativeRiskQuestionTokens = [
+  "presenca de",
+  "presença de",
+  "praga presente",
+  "existe",
+  "ha ",
+  "há ",
+  "odor putrido",
+  "odor pútrido",
+  "vazamento",
+  "contaminado",
+  "contaminada",
+  "vencido",
+  "vencida",
+];
 
 const DEFAULT_DASHBOARD_CONFIG: DashboardCustomizationConfig = {
   selectedKpis: [],
@@ -330,46 +382,78 @@ function confidenceFromScore(score: number): number {
   return clamp(score, 0, 1);
 }
 
-function parseAsOutcome(rawValue: unknown): QAOutcome {
-  const normalized = toStringValue(rawValue).toLowerCase().trim();
-  if (!normalized) {
-    return "unknown";
+function normalizeSemanticText(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[_\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function prettifyLabel(value: string): string {
+  const cleaned = value.replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return "";
   }
-  if (naTokens.some((token) => normalized === token || normalized.includes(token))) {
+  return cleaned
+    .split(" ")
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join(" ");
+}
+
+function parseAsOutcome(rawValue: unknown): QAOutcome {
+  const normalizedRaw = toStringValue(rawValue);
+  const normalized = normalizeSemanticText(normalizedRaw);
+  if (!normalized) {
     return "na";
+  }
+  if (
+    naTokens.some((token) => {
+      const normalizedToken = normalizeSemanticText(token);
+      if (!normalizedToken) return false;
+      if (normalizedToken.length <= 2) {
+        return normalized === normalizedToken;
+      }
+      return normalized === normalizedToken || normalized.includes(normalizedToken);
+    })
+  ) {
+    return "na";
+  }
+  if (
+    statusFailTokens.some((token) => {
+      const normalizedToken = normalizeSemanticText(token);
+      return normalized.includes(normalizedToken);
+    })
+  ) {
+    return "fail";
+  }
+  if (
+    noTokens.some((token) => {
+      const normalizedToken = normalizeSemanticText(token);
+      return normalized === normalizedToken;
+    })
+  ) {
+    return "no";
   }
   if (statusPassTokens.some((token) => normalized.includes(token))) {
     return "pass";
   }
-  if (statusFailTokens.some((token) => normalized.includes(token))) {
-    return "fail";
-  }
-  if (yesTokens.includes(normalized)) {
+  const yesPattern = /\b(sim|yes|true)\b/;
+  if (yesPattern.test(normalized) || yesTokens.includes(normalized)) {
     return "yes";
   }
-  if (noTokens.includes(normalized)) {
+  const noPattern = /\b(nao|no|false)\b/;
+  if (noPattern.test(normalized)) {
     return "no";
   }
   return "unknown";
 }
 
 function inferQuestionPolarity(question: string): SemanticQuestionPolarity {
-  const q = question.toLowerCase();
-  const negativeClues = [
-    "vazamento",
-    "odor",
-    "praga",
-    "risco",
-    "dano",
-    "contamin",
-    "obstr",
-    "defeito",
-    "sujeira",
-    "falha",
-    "nao conforme",
-    "não conforme",
-    "incidente",
-  ];
+  const q = normalizeSemanticText(question);
+  const negativeClues = [...explicitNegativeRiskQuestionTokens, "risco", "dano", "obstr", "defeito", "sujeira", "falha", "nao conforme", "incidente"];
   const positiveClues = [
     "conforme",
     "limpo",
@@ -387,51 +471,15 @@ function inferQuestionPolarity(question: string): SemanticQuestionPolarity {
   if (negativeClues.some((clue) => q.includes(clue))) {
     return "negative";
   }
+  // Perguntas do tipo "ausência de X?" seguem o padrão padrão de checklist:
+  // "sim" conforme, "não" falha.
+  if (q.includes("ausencia de") || q.includes("ausencia ")) {
+    return "positive";
+  }
   if (positiveClues.some((clue) => q.includes(clue))) {
     return "positive";
   }
-  if (q.includes("ausencia") || q.includes("ausência")) {
-    return "negative";
-  }
-  if (q.includes("existe") || q.startsWith("ha ") || q.startsWith("há ")) {
-    return "negative";
-  }
   return "neutral";
-}
-
-function applySemanticRule(
-  questionPolarity: SemanticQuestionPolarity,
-  outcome: QAOutcome,
-  responseRaw: string,
-): "real_failure" | "non_failure" | "na" | "undetermined" {
-  if (outcome === "na") {
-    return "na";
-  }
-  if (outcome === "unknown") {
-    return "undetermined";
-  }
-  if (outcome === "fail") {
-    return "real_failure";
-  }
-  if (outcome === "pass") {
-    return "non_failure";
-  }
-  if (outcome === "yes") {
-    if (questionPolarity === "negative") {
-      return "real_failure";
-    }
-    return "non_failure";
-  }
-  if (outcome === "no") {
-    if (questionPolarity === "positive") {
-      return "real_failure";
-    }
-    return "non_failure";
-  }
-  if (responseRaw.toLowerCase().includes("não conforme") || responseRaw.toLowerCase().includes("nao conforme")) {
-    return "real_failure";
-  }
-  return "undetermined";
 }
 
 function resolveQuestionType(
@@ -471,7 +519,7 @@ function questionIsIgnored(question: string, config: ManualReviewConfig | undefi
 }
 
 function inferThemeFromQuestion(question: string): string {
-  const q = question.toLowerCase();
+  const q = normalizeSemanticText(question);
   if (/(praga|inseto|roedor|pest)/i.test(q)) return "pragas";
   if (/(contamin|contamina|odor pútrido|odor putrido)/i.test(q)) return "contaminacao";
   if (/(vencid|expirad|validade)/i.test(q)) return "vencimento";
@@ -612,11 +660,11 @@ function detectInspectionFields(
   dataset: NormalizedDataset,
   inference: DatasetTypeInference,
 ): { questionCol?: string; answerCol?: string; sectionCol?: string; dateCol?: string; unitCol?: string } {
-  const lowerHeaders = dataset.headers.map((h) => ({ raw: h, lower: h.toLowerCase() }));
+  const lowerHeaders = dataset.headers.map((h) => ({ raw: h, lower: normalizeSemanticText(h) }));
 
   const pickByKeyword = (keys: string[]): string | undefined => {
     for (const header of lowerHeaders) {
-      if (keys.some((k) => header.lower.includes(k))) {
+      if (keys.some((k) => header.lower.includes(normalizeSemanticText(k)))) {
         return header.raw;
       }
     }
@@ -639,12 +687,251 @@ function detectInspectionFields(
   return { questionCol, answerCol, sectionCol, dateCol, unitCol };
 }
 
+function isInspectionMetadataField(header: string): boolean {
+  const normalized = normalizeSemanticText(header);
+  return inspectionMetadataTokens.some((token) => {
+    const normalizedToken = normalizeSemanticText(token);
+    return normalized === normalizedToken || normalized.startsWith(`${normalizedToken} `);
+  });
+}
+
+function isTitlePageLikeField(header: string): boolean {
+  const normalized = normalizeSemanticText(header);
+  return normalized.includes("title page");
+}
+
+function getInspectionQuestionColumns(dataset: NormalizedDataset): string[] {
+  return dataset.headers.filter((header) => {
+    const rawLower = toStringValue(header).trim().toLowerCase();
+    if (!inspectionColumnPrefixPattern.test(rawLower)) {
+      return false;
+    }
+    if (rawLower.endsWith("_notes") || rawLower.endsWith(" notes")) {
+      return false;
+    }
+    const withoutPrefix = rawLower.replace(inspectionColumnPrefixPattern, "");
+    const normalized = normalizeSemanticText(withoutPrefix);
+    if (isInspectionMetadataField(normalized) || isTitlePageLikeField(normalized)) {
+      return false;
+    }
+    if (!normalized) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function parseInspectionColumn(header: string): { section?: string; question: string } {
+  const rawLower = toStringValue(header).trim().toLowerCase();
+  const withoutPrefix = rawLower.replace(inspectionColumnPrefixPattern, "");
+  const remainder = normalizeSemanticText(withoutPrefix).trim();
+  if (!remainder) {
+    return { question: "(pergunta nao identificada)" };
+  }
+
+  const tokens = remainder.split(" ").filter(Boolean);
+  if (tokens.length === 0) {
+    return { question: "(pergunta nao identificada)" };
+  }
+
+  const meaningfulTokens = tokens.filter(
+    (token) =>
+      !inspectionQuestionNoiseTokens.has(token) &&
+      !yesTokens.includes(token) &&
+      !noTokens.includes(token) &&
+      token !== "na",
+  );
+
+  const sectionToken = meaningfulTokens[0];
+  const section = sectionToken ? prettifyLabel(sectionToken) : undefined;
+
+  const questionTokens = meaningfulTokens.slice(1);
+  const rawQuestion = questionTokens.join(" ").trim();
+  const question = rawQuestion ? prettifyLabel(rawQuestion) : "";
+
+  return {
+    section,
+    question:
+      question ||
+      (meaningfulTokens.length > 0
+        ? prettifyLabel(meaningfulTokens.join(" "))
+        : prettifyLabel(tokens.join(" "))) ||
+      "(pergunta nao identificada)",
+  };
+}
+
+function pickFirstNonEmpty(row: Record<string, unknown>, keys: string[]): string {
+  for (const [key, value] of Object.entries(row)) {
+    const normalizedKey = normalizeSemanticText(key);
+    if (!keys.some((candidate) => normalizedKey.includes(normalizeSemanticText(candidate)))) {
+      continue;
+    }
+    const normalizedValue = toStringValue(value).trim();
+    if (normalizedValue) {
+      return normalizedValue;
+    }
+  }
+  return "";
+}
+
+function extractUnitNameFromRow(row: Record<string, unknown>): string {
+  const fromSupermercado = pickFirstNonEmpty(row, ["title page_supermercado"]);
+  if (fromSupermercado) {
+    return fromSupermercado;
+  }
+  const fromLocation = pickFirstNonEmpty(row, ["title page_site conducted_location"]);
+  if (fromLocation) {
+    return fromLocation;
+  }
+  const fromCommon = pickFirstNonEmpty(row, [
+    "unidade",
+    "loja",
+    "store",
+    "site",
+    "location",
+    "nome fantasia",
+    "razao social",
+  ]);
+  if (fromCommon) {
+    return fromCommon;
+  }
+  return "";
+}
+
+function isNegativeRiskQuestion(question: string): boolean {
+  const normalized = normalizeSemanticText(question);
+  if (!normalized) return false;
+  return explicitNegativeRiskQuestionTokens.some((token) => normalized.includes(normalizeSemanticText(token)));
+}
+
+function applyInspectionSemanticRule(
+  question: string,
+  questionPolarity: SemanticQuestionPolarity,
+  outcome: QAOutcome,
+): "real_failure" | "non_failure" | "na" | "undetermined" {
+  if (outcome === "na") {
+    return "na";
+  }
+  if (outcome === "pass") {
+    return "non_failure";
+  }
+  if (outcome === "fail") {
+    return "real_failure";
+  }
+  if (outcome !== "yes" && outcome !== "no") {
+    return "undetermined";
+  }
+
+  const normalizedQuestion = normalizeSemanticText(question);
+  const hasAbsenceWording =
+    normalizedQuestion.includes("ausencia de") || normalizedQuestion.includes("ausencia ");
+  if (hasAbsenceWording) {
+    return outcome === "yes" ? "non_failure" : "real_failure";
+  }
+  if (isNegativeRiskQuestion(question) || questionPolarity === "negative") {
+    return outcome === "yes" ? "real_failure" : "non_failure";
+  }
+  return outcome === "yes" ? "non_failure" : "real_failure";
+}
+
+function buildInspectionItemsFromWideRows(
+  dataset: NormalizedDataset,
+  config: ManualReviewConfig | undefined,
+  dashboardConfig: DashboardCustomizationConfig | undefined,
+): { items: QAItem[]; stats: Record<string, number> } {
+  const questionColumns = getInspectionQuestionColumns(dataset);
+  const items: QAItem[] = [];
+  let ignoredCount = 0;
+
+  const dateColumn =
+    dataset.headers.find((header) => /(^|[_\s-])(start|date|data|completed|lastupdate)($|[_\s-])/i.test(header)) ??
+    undefined;
+  const auditIdColumn =
+    dataset.headers.find((header) => /(^|[_\s-])(auditid|inspection id|inspectionid)($|[_\s-])/i.test(header)) ??
+    undefined;
+
+  for (const row of dataset.rows) {
+    const unitName = extractUnitNameFromRow(row as Record<string, unknown>);
+    const auditId = auditIdColumn ? toStringValue(row[auditIdColumn]).trim() : "";
+    const rowDate = dateColumn ? toStringValue(row[dateColumn]).trim() : "";
+    for (const column of questionColumns) {
+      const answerRaw = toStringValue(row[column]).trim();
+      if (!answerRaw) {
+        continue;
+      }
+      const parsedColumn = parseInspectionColumn(column);
+      const question = parsedColumn.question || "(pergunta nao identificada)";
+      if (questionIsIgnored(question, config)) {
+        ignoredCount += 1;
+        continue;
+      }
+      const outcome = parseAsOutcome(answerRaw);
+      const inferredPolarity = resolveQuestionType(question, outcome, config);
+      const semanticResult = applyInspectionSemanticRule(question, inferredPolarity, outcome);
+      const theme = inferThemeFromQuestion(question);
+      const criticalOverride =
+        config?.questionOverrides.find((override) => override.questionText === question)?.critical ?? false;
+      const resolvedWeight = resolveQuestionWeight({
+        question,
+        section: parsedColumn.section,
+        theme,
+        reviewConfig: config,
+        dashboardConfig,
+      });
+      const sourceRow: Record<string, unknown> = {
+        ...row,
+        auditId,
+        unitName,
+        unidade: unitName,
+        loja: unitName,
+        section: parsedColumn.section ?? "",
+        question,
+        originalAnswer: answerRaw,
+        normalizedAnswer: outcome,
+        questionPolarity: inferredPolarity,
+        result: semanticResult,
+        weight: resolvedWeight.weight,
+      };
+
+      items.push({
+        question,
+        responseRaw: answerRaw,
+        normalizedOutcome: outcome,
+        section: parsedColumn.section,
+        theme,
+        date: rowDate || undefined,
+        semanticPolarity: inferredPolarity,
+        semanticResult,
+        critical: criticalOverride,
+        weight: resolvedWeight.weight,
+        weightSource: resolvedWeight.source,
+        sourceRow,
+      });
+    }
+  }
+
+  return {
+    items,
+    stats: {
+      ignoredCount,
+      inspectionRowsProcessed: dataset.rows.length,
+      inspectionQuestionColumnCount: questionColumns.length,
+      wideInspectionDetected: questionColumns.length > 0 ? 1 : 0,
+    },
+  };
+}
+
 function buildInspectionItems(
   dataset: NormalizedDataset,
   inference: DatasetTypeInference,
   config: ManualReviewConfig | undefined,
   dashboardConfig: DashboardCustomizationConfig | undefined,
 ): { items: QAItem[]; stats: Record<string, number> } {
+  const wideRowsResult = buildInspectionItemsFromWideRows(dataset, config, dashboardConfig);
+  if (wideRowsResult.stats.wideInspectionDetected) {
+    return wideRowsResult;
+  }
+
   const { questionCol, answerCol, sectionCol, dateCol } = detectInspectionFields(dataset, inference);
   const items: QAItem[] = [];
   let ignoredCount = 0;
@@ -662,7 +949,7 @@ function buildInspectionItems(
 
     const outcome = parseAsOutcome(responseRaw);
     const polarity = resolveQuestionType(question, outcome, config);
-    const semantics = applySemanticRule(polarity, outcome, responseRaw);
+    const semantics = applyInspectionSemanticRule(question, polarity, outcome);
     const section = sectionCol ? toStringValue(row[sectionCol]).trim() : "";
     const theme = inferThemeFromQuestion(question);
     const criticalOverride = config?.questionOverrides.find((q) => q.questionText === question)?.critical ?? false;
@@ -694,6 +981,9 @@ function buildInspectionItems(
     items,
     stats: {
       ignoredCount,
+      inspectionRowsProcessed: dataset.rows.length,
+      inspectionQuestionColumnCount: 0,
+      wideInspectionDetected: 0,
     },
   };
 }
@@ -2657,9 +2947,9 @@ export function analyzeDataset(
   const shouldInspect =
     inference.datasetType === "inspection_checklist" ||
     /inspection|checklist|inspe[cç][aã]o|safetyculture/i.test(parsed.fileName);
-  const { items: qaItems } = shouldInspect
+  const { items: qaItems, stats: inspectionStats } = shouldInspect
     ? buildInspectionItems(normalized, inference, reviewConfig, dashboardConfigInput)
-    : { items: [] as QAItem[] };
+    : { items: [] as QAItem[], stats: {} as Record<string, number> };
   const sourceScoreSummary = buildSourceScoreSummary(normalized);
   const weightedQaItems = applyConfiguredWeights(qaItems, dashboardConfigInput);
   const weightedSummary = calculateWeightedMetricsSummary(weightedQaItems, sourceScoreSummary);
@@ -2743,6 +3033,18 @@ export function analyzeDataset(
     shouldInspect,
   });
 
+  const applicableItems = qaItems.filter(
+    (item) => item.semanticResult === "real_failure" || item.semanticResult === "non_failure",
+  );
+  const conformingAnswers = qaItems.filter((item) => item.semanticResult === "non_failure").length;
+  const realFailures = qaItems.filter((item) => item.semanticResult === "real_failure").length;
+  const notApplicable = qaItems.filter((item) => item.semanticResult === "na").length;
+  const undetermined = qaItems.filter((item) => item.semanticResult === "undetermined").length;
+  const failurePercentage = applicableItems.length > 0 ? (realFailures / applicableItems.length) * 100 : 0;
+  const calculatedICS = applicableItems.length > 0 ? (conformingAnswers / applicableItems.length) * 100 : 0;
+  const sourceICS = sourceScoreSummary?.compliancePercentage;
+  const weightedFailureScore = weightedSummary.totalWeightedFailures;
+
   return {
     datasetType: inference.datasetType,
     datasetTypeConfidence: confidenceFromScore(inference.confidence),
@@ -2792,18 +3094,27 @@ export function analyzeDataset(
       qaItems.length > 0
         ? {
             totalItems: qaItems.length,
-            realFailures: qaItems.filter((item) => item.semanticResult === "real_failure").length,
-            nonFailures: qaItems.filter((item) => item.semanticResult === "non_failure").length,
-            notApplicable: qaItems.filter((item) => item.semanticResult === "na").length,
-            undetermined: qaItems.filter((item) => item.semanticResult === "undetermined").length,
+            conformingAnswers,
+            realFailures,
+            nonFailures: conformingAnswers,
+            notApplicable,
+            undetermined,
+            failurePercentage,
+            calculatedICS,
+            sourceICS,
             icsSimple: weightedSummary.icsSimple,
             icsWeighted: weightedSummary.icsWeighted,
             totalWeightedFailures: weightedSummary.totalWeightedFailures,
+            weightedFailureScore,
             weightedRiskScore: weightedSummary.weightedRiskScore,
             averageFailureSeverity: weightedSummary.averageFailureSeverity,
             averageQuestionWeight: weightedSummary.averageQuestionWeight,
             averageFailureWeight: weightedSummary.averageFailureWeight,
             weightedRiskClassification: weightedSummary.weightedRiskClassification,
+            validInspectionQuestionColumns:
+              shouldInspect && Number.isFinite(inspectionStats.inspectionQuestionColumnCount)
+                ? inspectionStats.inspectionQuestionColumnCount
+                : undefined,
             weightSourceSummary: {
               usuarioPergunta: weightedSummary.weightSourceBreakdown.usuario_pergunta,
               usuarioSecao: weightedSummary.weightSourceBreakdown.usuario_secao,
@@ -2814,7 +3125,9 @@ export function analyzeDataset(
             sourceScore: sourceScoreSummary,
             bySection: topN(
               countBy(
-                qaItems.map((item) => item.section || "Sem secao"),
+                qaItems
+                  .filter((item) => item.semanticResult === "real_failure")
+                  .map((item) => item.section || "Sem secao"),
               ),
               30,
             ).map(([section, total]) => ({ section, total })),

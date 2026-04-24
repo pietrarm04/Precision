@@ -288,18 +288,24 @@ export interface AnalysisResult {
   sourceScore?: SourceScoreSummary;
   qaAnalysis?: {
     totalItems: number;
+    conformingAnswers?: number;
     realFailures: number;
     nonFailures: number;
     notApplicable: number;
     undetermined: number;
+    failurePercentage?: number;
+    calculatedICS?: number;
+    sourceICS?: number;
     icsSimple?: number;
     icsWeighted?: number;
     totalWeightedFailures?: number;
+    weightedFailureScore?: number;
     weightedRiskScore?: number;
     averageFailureSeverity?: number;
     averageQuestionWeight?: number;
     averageFailureWeight?: number;
     weightedRiskClassification?: WeightedRiskLevel;
+    validInspectionQuestionColumns?: number;
     weightSourceSummary?: {
       usuarioPergunta: number;
       usuarioSecao: number;

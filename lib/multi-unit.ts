@@ -80,13 +80,27 @@ function inferUnitName(
   fileName: string,
   userLabel?: string,
 ): string {
+  const fromQaRows = selectMostFrequent(
+    (analysis.interpretedPreview ?? []) as Record<string, unknown>[],
+    ["unitname", "unit_name", "unidade", "loja", "store", "site", "location"],
+  );
+  if (fromQaRows) {
+    return fromQaRows;
+  }
   const rows = analysis.normalizedRowsForExport as Record<string, unknown>[];
+  const titlePageSupermercado = selectMostFrequent(rows ?? [], ["title page_supermercado"]);
+  if (titlePageSupermercado) {
+    return titlePageSupermercado;
+  }
+  const titlePageLocation = selectMostFrequent(rows ?? [], ["title page_site conducted_location"]);
+  if (titlePageLocation) {
+    return titlePageLocation;
+  }
   const metadataKeys =
     grouping === "setor"
       ? ["setor", "sector", "section", "area", "departamento"]
       : ["loja", "store", "site", "location", "unidade", "branch", "local"];
   const metadataLabel = selectMostFrequent(rows ?? [], metadataKeys);
-  // Prioridade solicitada: metadata > nome do arquivo > rótulo definido pelo usuário.
   return metadataLabel || fileNameToLabel(fileName) || userLabel?.trim() || "Unidade sem identificação";
 }
 
