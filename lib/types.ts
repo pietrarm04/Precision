@@ -40,17 +40,21 @@ export interface DatasetTypeInference {
 export type QAOutcome = "yes" | "no" | "pass" | "fail" | "na" | "unknown";
 export type SemanticQuestionPolarity = "positive" | "negative" | "neutral";
 export type SemanticResult = "real_failure" | "non_failure" | "na" | "undetermined";
+export type WeightSource = "usuario_pergunta" | "usuario_secao" | "usuario_tema" | "inferido" | "default";
+export type WeightedRiskLevel = "regular" | "atencao" | "risco_multa" | "risco_interdicao";
 
 export interface QAItem {
   question: string;
   responseRaw: string;
   normalizedOutcome: QAOutcome;
   section?: string;
+  theme?: string;
   date?: string;
   semanticPolarity: SemanticQuestionPolarity;
   semanticResult: SemanticResult;
   critical: boolean;
   weight: number;
+  weightSource?: WeightSource;
   sourceRow: RowMap;
 }
 
@@ -101,7 +105,20 @@ export interface DashboardCustomizationConfig {
   selectedKpis: KpiKey[];
   grouping: DashboardGrouping;
   debugMode?: boolean;
+  primaryIcsMetric?: "simples" | "ponderado";
   kpiTargets?: Partial<Record<KpiKey, number>>;
+  questionWeights?: Array<{
+    questionText: string;
+    weight: number;
+  }>;
+  sectionWeights?: Array<{
+    section: string;
+    weight: number;
+  }>;
+  themeWeights?: Array<{
+    theme: string;
+    weight: number;
+  }>;
   visibleSections?: {
     kpiOverview: boolean;
     sanitaryPerformance: boolean;
@@ -147,6 +164,23 @@ export interface SourceScoreSummary {
   explanation: string;
 }
 
+export interface WeightedMetricsSummary {
+  icsSimple: number;
+  icsWeighted: number;
+  totalSimpleFailures: number;
+  totalWeightedFailures: number;
+  weightedFailureScore: number;
+  weightedRiskScore: number;
+  averageFailureSeverity: number;
+  averageQuestionWeight: number;
+  averageFailureWeight: number;
+  criticalFailures: number;
+  recurrenceFailures: number;
+  affectedSections: number;
+  weightedRiskClassification: WeightedRiskLevel;
+  weightSourceBreakdown: Record<WeightSource, number>;
+}
+
 export interface AnalysisResult {
   debugMode?: boolean;
   analysisDebug?: {
@@ -190,6 +224,21 @@ export interface AnalysisResult {
     nonFailures: number;
     notApplicable: number;
     undetermined: number;
+    icsSimple?: number;
+    icsWeighted?: number;
+    totalWeightedFailures?: number;
+    weightedRiskScore?: number;
+    averageFailureSeverity?: number;
+    averageQuestionWeight?: number;
+    averageFailureWeight?: number;
+    weightedRiskClassification?: WeightedRiskLevel;
+    weightSourceSummary?: {
+      usuarioPergunta: number;
+      usuarioSecao: number;
+      usuarioTema: number;
+      inferido: number;
+      default: number;
+    };
     sourceScore?: SourceScoreSummary;
     bySection: Array<{ section: string; total: number }>;
     topFailedQuestions: Array<{ question: string; total: number }>;
@@ -231,18 +280,39 @@ export interface AnalysisResult {
     };
     risk?: {
       counts: Array<{
-        level: "baixo_risco" | "atencao" | "possivel_multa" | "possivel_interdicao";
+        level: WeightedRiskLevel;
         label: string;
         count: number;
       }>;
       ranking: Array<{
         group: string;
-        ics: number;
-        failureRate: number;
+        icsSimple: number;
+        icsWeighted: number;
+        simpleFailures: number;
+        weightedFailures: number;
+        averageWeight: number;
         criticalCount: number;
-        level: "baixo_risco" | "atencao" | "possivel_multa" | "possivel_interdicao";
+        weightedRiskScore: number;
+        level: WeightedRiskLevel;
       }>;
       missingMessage?: string;
+    };
+    weightedComparison?: {
+      icsSimple: number;
+      icsWeighted: number;
+      weightedRiskScore: number;
+      averageFailureWeight: number;
+      weightedRiskClassification: WeightedRiskLevel;
+    };
+    weightTransparency?: {
+      bySource: {
+        usuarioPergunta: number;
+        usuarioSecao: number;
+        usuarioTema: number;
+        inferido: number;
+        default: number;
+      };
+      message: string;
     };
   };
   transparency: {

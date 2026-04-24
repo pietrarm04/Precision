@@ -104,10 +104,10 @@ export function runAnalysisPipeline(
         },
         risk: {
           counts: [
-            { level: "baixo_risco", label: "Baixo risco", count: 0 },
+            { level: "regular", label: "Regular", count: 0 },
             { level: "atencao", label: "Atenção", count: 0 },
-            { level: "possivel_multa", label: "Possível risco de multa", count: 0 },
-            { level: "possivel_interdicao", label: "Possível risco de interdição", count: 0 },
+            { level: "risco_multa", label: "Risco de multa", count: 0 },
+            { level: "risco_interdicao", label: "Risco de interdição", count: 0 },
           ],
           ranking: [],
           missingMessage: "Dados insuficientes para calcular risco sanitário.",
@@ -133,6 +133,7 @@ export function runAnalysisPipeline(
     inference,
     rules,
     options?.dashboardConfig,
+    options?.debugMode ?? false,
   );
   return {
     ...result,

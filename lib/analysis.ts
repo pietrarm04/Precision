@@ -14,7 +14,10 @@ import {
   QAOutcome,
   SemanticQuestionPolarity,
   SourceScoreSummary,
+  WeightedMetricsSummary,
+  WeightedRiskLevel,
   WeightedIssue,
+  WeightSource,
 } from "@/lib/types";
 import {
   average,
@@ -109,8 +112,14 @@ const KPI_LABELS: Record<KpiKey, string> = {
   quantidade_inspecoes: "Quantidade de inspeções",
 };
 
+const RISK_LABELS: Record<WeightedRiskLevel, string> = {
+  regular: "Regular",
+  atencao: "Atenção",
+  risco_multa: "Risco de multa",
+  risco_interdicao: "Risco de interdição",
+};
+
 type StatusLevel = "atingido" | "atencao" | "critico";
-type RiskLevel = "baixo_risco" | "atencao" | "possivel_multa" | "possivel_interdicao";
 
 type GroupInspectionStats = {
   group: string;
@@ -121,9 +130,48 @@ type GroupInspectionStats = {
   na: number;
   undetermined: number;
   criticalFailures: number;
-  ics: number;
+  weightedFailures: number;
+  weightedFailureScore: number;
+  averageWeight: number;
+  icsSimple: number;
+  icsWeighted: number;
   failureRate: number;
+  weightedRiskScore: number;
+  weightedRiskLevel: WeightedRiskLevel;
 };
+
+function calculateWeightedMetricsSummary(
+  qaItems: QAItem[],
+  sourceScore?: SourceScoreSummary,
+): WeightedMetricsSummary {
+  const fallback: WeightedMetricsSummary = {
+    icsSimple: sourceScore?.compliancePercentage ?? 0,
+    icsWeighted: sourceScore?.compliancePercentage ?? 0,
+    totalSimpleFailures: 0,
+    totalWeightedFailures: 0,
+    weightedFailureScore: 0,
+    weightedRiskScore: 0,
+    averageFailureSeverity: 0,
+    averageQuestionWeight: DEFAULT_WEIGHT,
+    averageFailureWeight: 0,
+    criticalFailures: 0,
+    recurrenceFailures: 0,
+    affectedSections: 0,
+    weightedRiskClassification: "regular",
+    weightSourceBreakdown: {
+      usuario_pergunta: 0,
+      usuario_secao: 0,
+      usuario_tema: 0,
+      inferido: 0,
+      default: 0,
+    },
+  };
+  const computed = calculateWeightedSummaryFromQaItems(qaItems);
+  if (!computed) {
+    return fallback;
+  }
+  return computed;
+}
 
 function detectColumnTypes(dataset: NormalizedDataset): Record<string, ColumnType> {
   const types: Record<string, ColumnType> = {};
@@ -315,22 +363,142 @@ function questionIsIgnored(question: string, config: ManualReviewConfig | undefi
   return defaultIgnoredRegex.test(question);
 }
 
-function questionWeight(
-  question: string,
-  section: string | undefined,
-  config: ManualReviewConfig | undefined,
-): number {
-  const qOverride = config?.questionOverrides.find((entry) => entry.questionText === question);
-  if (qOverride?.weight !== undefined) {
-    return qOverride.weight;
+function inferThemeFromQuestion(question: string): string {
+  const q = question.toLowerCase();
+  if (/(praga|inseto|roedor|pest)/i.test(q)) return "pragas";
+  if (/(contamin|contamina|odor pútrido|odor putrido)/i.test(q)) return "contaminacao";
+  if (/(vencid|expirad|validade)/i.test(q)) return "vencimento";
+  if (/(temperatura|freezer|geladeira|frio|quente)/i.test(q)) return "temperatura";
+  if (/(higiene|limp|sujeira|sanit)/i.test(q)) return "higiene";
+  if (/(document|registro|evid[eê]ncia|assinatura|checklist)/i.test(q)) return "documentacao";
+  if (/(armazen|estoque|storage)/i.test(q)) return "armazenamento";
+  return "geral";
+}
+
+function inferDefaultWeightByTheme(theme: string): number {
+  if (theme === "contaminacao" || theme === "pragas" || theme === "temperatura" || theme === "vencimento") {
+    return 5;
   }
+  if (theme === "higiene" || theme === "armazenamento") {
+    return 4;
+  }
+  if (theme === "documentacao") {
+    return 3;
+  }
+  return 1;
+}
+
+function resolveQuestionWeight(args: {
+  question: string;
+  section?: string;
+  theme: string;
+  reviewConfig?: ManualReviewConfig;
+  dashboardConfig?: DashboardCustomizationConfig;
+}): { weight: number; source: WeightSource } {
+  const question = args.question.trim();
+  const section = args.section?.trim();
+  const theme = args.theme.trim();
+
+  const qUser = args.dashboardConfig?.questionWeights?.find((item) => item.questionText === question);
+  if (qUser?.weight !== undefined) {
+    return { weight: clamp(qUser.weight, 1, 5), source: "usuario_pergunta" };
+  }
+
+  const qReview = args.reviewConfig?.questionOverrides.find((entry) => entry.questionText === question);
+  if (qReview?.weight !== undefined) {
+    return { weight: clamp(qReview.weight, 1, 5), source: "usuario_pergunta" };
+  }
+
   if (section) {
-    const sOverride = config?.sectionWeights.find((entry) => entry.section === section);
-    if (sOverride) {
-      return sOverride.weight;
+    const sUser = args.dashboardConfig?.sectionWeights?.find((item) => item.section === section);
+    if (sUser?.weight !== undefined) {
+      return { weight: clamp(sUser.weight, 1, 5), source: "usuario_secao" };
+    }
+    const sReview = args.reviewConfig?.sectionWeights.find((entry) => entry.section === section);
+    if (sReview?.weight !== undefined) {
+      return { weight: clamp(sReview.weight, 1, 5), source: "usuario_secao" };
     }
   }
-  return DEFAULT_WEIGHT;
+
+  if (theme) {
+    const tUser = args.dashboardConfig?.themeWeights?.find((item) => item.theme === theme);
+    if (tUser?.weight !== undefined) {
+      return { weight: clamp(tUser.weight, 1, 5), source: "usuario_tema" };
+    }
+  }
+
+  const inferred = inferDefaultWeightByTheme(theme);
+  if (inferred !== DEFAULT_WEIGHT) {
+    return { weight: inferred, source: "inferido" };
+  }
+  return { weight: DEFAULT_WEIGHT, source: "default" };
+}
+
+function applyConfiguredWeights(
+  qaItems: QAItem[],
+  dashboardConfig: DashboardCustomizationConfig | undefined,
+): QAItem[] {
+  if (!dashboardConfig) {
+    return qaItems;
+  }
+  return qaItems.map((item) => {
+    const resolved = resolveQuestionWeight({
+      question: item.question,
+      section: item.section,
+      theme: item.theme || inferThemeFromQuestion(item.question),
+      dashboardConfig,
+    });
+    return {
+      ...item,
+      weight: resolved.weight,
+      weightSource: resolved.source,
+    };
+  });
+}
+
+function classifyWeightedRisk(args: {
+  icsWeighted: number;
+  weightedRiskScore: number;
+  criticalFailures: number;
+  recurrenceRate: number;
+  affectedSections: number;
+  highRiskThemeHits: number;
+}): WeightedRiskLevel {
+  if (
+    args.icsWeighted < 50 ||
+    args.criticalFailures > 0 ||
+    args.highRiskThemeHits > 0 ||
+    args.weightedRiskScore >= 80
+  ) {
+    return "risco_interdicao";
+  }
+  if (
+    (args.icsWeighted >= 50 && args.icsWeighted < 75) ||
+    args.recurrenceRate >= 0.35 ||
+    args.affectedSections >= 3 ||
+    args.weightedRiskScore >= 45
+  ) {
+    return "risco_multa";
+  }
+  if (args.icsWeighted >= 75 && args.icsWeighted < 90) {
+    return "atencao";
+  }
+  return "regular";
+}
+
+function weightedRiskOrder(level: WeightedRiskLevel): number {
+  return (
+    {
+      risco_interdicao: 4,
+      risco_multa: 3,
+      atencao: 2,
+      regular: 1,
+    } satisfies Record<WeightedRiskLevel, number>
+  )[level];
+}
+
+function weightedRiskLabel(level: WeightedRiskLevel): string {
+  return RISK_LABELS[level];
 }
 
 function detectInspectionFields(
@@ -368,6 +536,7 @@ function buildInspectionItems(
   dataset: NormalizedDataset,
   inference: DatasetTypeInference,
   config: ManualReviewConfig | undefined,
+  dashboardConfig: DashboardCustomizationConfig | undefined,
 ): { items: QAItem[]; stats: Record<string, number> } {
   const { questionCol, answerCol, sectionCol, dateCol } = detectInspectionFields(dataset, inference);
   const items: QAItem[] = [];
@@ -388,19 +557,28 @@ function buildInspectionItems(
     const polarity = resolveQuestionType(question, outcome, config);
     const semantics = applySemanticRule(polarity, outcome, responseRaw);
     const section = sectionCol ? toStringValue(row[sectionCol]).trim() : "";
+    const theme = inferThemeFromQuestion(question);
     const criticalOverride = config?.questionOverrides.find((q) => q.questionText === question)?.critical ?? false;
-    const weight = questionWeight(question, section || undefined, config);
+    const resolvedWeight = resolveQuestionWeight({
+      question,
+      section: section || undefined,
+      theme,
+      reviewConfig: config,
+      dashboardConfig,
+    });
 
     items.push({
       question: question || "(pergunta nao identificada)",
       responseRaw,
       normalizedOutcome: outcome,
       section: section || undefined,
+      theme,
       date: dateCol ? toStringValue(row[dateCol]) : undefined,
       semanticPolarity: polarity,
       semanticResult: semantics,
       critical: criticalOverride,
-      weight,
+      weight: resolvedWeight.weight,
+      weightSource: resolvedWeight.source,
       sourceRow: row,
     });
   }
@@ -1394,6 +1572,7 @@ function createInsights(
   columnTypes: Record<string, ColumnType>,
   qaItems: QAItem[],
   weightedIssues: WeightedIssue[],
+  weightedSummary: WeightedMetricsSummary | undefined,
   dashboardMeta: DashboardSelectionMeta,
 ): string[] {
   const insights: string[] = [];
@@ -1412,11 +1591,11 @@ function createInsights(
 
     const byGroup = collectGroupStats(qaItems, "loja");
     if (byGroup.length >= 2) {
-      const sortedByIcs = [...byGroup].sort((a, b) => a.ics - b.ics);
+      const sortedByIcs = [...byGroup].sort((a, b) => a.icsWeighted - b.icsWeighted);
       const worst = sortedByIcs[0];
       const best = sortedByIcs[sortedByIcs.length - 1];
       insights.push(
-        `A unidade "${worst.group}" apresenta o menor nível de conformidade (${worst.ics.toFixed(1)}%), enquanto "${best.group}" lidera com ${best.ics.toFixed(1)}%.`,
+        `A unidade "${worst.group}" apresenta o menor nível de conformidade (${worst.icsWeighted.toFixed(1)}%), enquanto "${best.group}" lidera com ${best.icsWeighted.toFixed(1)}%.`,
       );
     }
 
@@ -1438,13 +1617,21 @@ function createInsights(
       );
     }
 
-    const icsValues = collectGroupStats(qaItems, "setor").map((entry) => entry.ics);
+    const icsValues = collectGroupStats(qaItems, "setor").map((entry) => entry.icsWeighted);
     if (icsValues.length > 1) {
       const deviation = Math.sqrt(average(icsValues.map((value) => (value - average(icsValues)) ** 2)));
       insights.push(
         deviation < 8
           ? "A baixa variabilidade do ICS indica padrão sanitário consistente entre áreas avaliadas."
           : "A variabilidade elevada do ICS indica diferenças relevantes entre áreas e necessidade de padronização.",
+      );
+    }
+
+    if (weightedSummary && weightedSummary.icsSimple - weightedSummary.icsWeighted >= 5) {
+      insights.push(
+        `Apesar do ICS simples alto (${weightedSummary.icsSimple.toFixed(1)}%), o ICS ponderado cai para ${weightedSummary.icsWeighted.toFixed(
+          1,
+        )}% devido à concentração de falhas críticas.`,
       );
     }
 
@@ -1508,6 +1695,7 @@ function createAlerts(
   structure: ReturnType<typeof structuralQuality>,
   qaItems: QAItem[],
   weightedIssues: WeightedIssue[],
+  weightedSummary: WeightedMetricsSummary | undefined,
   dashboardMeta: DashboardSelectionMeta,
 ): string[] {
   const alerts: string[] = [];
@@ -1534,6 +1722,11 @@ function createAlerts(
     }
     if (weightedIssues.length > 0 && weightedIssues[0].weight <= 1 && weightedIssues[0].failureRate > 0.4) {
       alerts.push("Falhas relevantes sem pesos diferenciados; considere configurar criticidade.");
+    }
+    if (weightedSummary && weightedSummary.weightedRiskClassification === "risco_interdicao") {
+      alerts.push(
+        "Classificação indicativa: possível risco de interdição por criticidade ponderada elevada (não é decisão legal).",
+      );
     }
   }
   if (dashboardMeta.rendered === 0) {
@@ -1584,6 +1777,94 @@ function buildRecommendationsForReview(qaItems: QAItem[]): ManualReviewConfig["q
     }));
 }
 
+function calculateWeightedSummaryFromQaItems(qaItems: QAItem[]): WeightedMetricsSummary | undefined {
+  if (qaItems.length === 0) {
+    return undefined;
+  }
+
+  const applicable = qaItems.filter(
+    (item) => item.semanticResult === "real_failure" || item.semanticResult === "non_failure",
+  );
+  if (applicable.length === 0) {
+    return undefined;
+  }
+
+  const conforming = applicable.filter((item) => item.semanticResult === "non_failure");
+  const failures = applicable.filter((item) => item.semanticResult === "real_failure");
+  const sumApplicableWeight = applicable.reduce((sum, item) => sum + (item.weight ?? DEFAULT_WEIGHT), 0);
+  const sumConformingWeight = conforming.reduce((sum, item) => sum + (item.weight ?? DEFAULT_WEIGHT), 0);
+  const sumFailureWeight = failures.reduce((sum, item) => sum + (item.weight ?? DEFAULT_WEIGHT), 0);
+  const criticalFailures = failures.filter((item) => item.critical || (item.weight ?? DEFAULT_WEIGHT) >= 4).length;
+  const recurrence = failures.length;
+  const affectedSections = new Set(failures.map((item) => item.section || "Sem seção")).size;
+  const themeWeightTotal = failures.reduce((sum, item) => sum + inferDefaultWeightByTheme(item.theme || "geral"), 0);
+
+  const icsSimple = (conforming.length / Math.max(applicable.length, 1)) * 100;
+  const icsWeighted = sumApplicableWeight > 0 ? (sumConformingWeight / sumApplicableWeight) * 100 : 0;
+  const weightedFailureScore = sumFailureWeight;
+  const weightedRiskScore =
+    (100 - icsWeighted) * 0.6 +
+    weightedFailureScore * 0.2 +
+    criticalFailures * 6 +
+    recurrence * 0.5 +
+    affectedSections * 1.5 +
+    themeWeightTotal * 0.1;
+  const averageFailureSeverity =
+    failures.length > 0 ? failures.reduce((sum, item) => sum + (item.weight ?? DEFAULT_WEIGHT), 0) / failures.length : 0;
+  const averageQuestionWeight = sumApplicableWeight / Math.max(applicable.length, 1);
+  const averageFailureWeight = failures.length > 0 ? sumFailureWeight / failures.length : 0;
+
+  let weightedRiskClassification: WeightedRiskLevel = "regular";
+  if (
+    icsWeighted < 50 ||
+    criticalFailures > 0 ||
+    failures.some(
+      (item) =>
+        /(praga|contamin|vencid|temperatura|higiene grave|interdição|interdicao)/i.test(
+          `${item.question} ${item.theme || ""}`,
+        ),
+    )
+  ) {
+    weightedRiskClassification = "risco_interdicao";
+  } else if (
+    (icsWeighted >= 50 && icsWeighted < 75) ||
+    failures.some((item) => (item.weight ?? DEFAULT_WEIGHT) >= 3) ||
+    failures.some((item) => /(higiene|document|armazen)/i.test(`${item.question} ${item.theme || ""}`))
+  ) {
+    weightedRiskClassification = "risco_multa";
+  } else if (icsWeighted >= 75 && icsWeighted < 90) {
+    weightedRiskClassification = "atencao";
+  }
+
+  const sourceBreakdown: Record<WeightSource, number> = {
+    usuario_pergunta: 0,
+    usuario_secao: 0,
+    usuario_tema: 0,
+    inferido: 0,
+    default: 0,
+  };
+  for (const item of qaItems) {
+    sourceBreakdown[item.weightSource ?? "default"] += 1;
+  }
+
+  return {
+    icsSimple,
+    icsWeighted,
+    totalSimpleFailures: failures.length,
+    totalWeightedFailures: sumFailureWeight,
+    weightedFailureScore,
+    weightedRiskScore,
+    averageFailureSeverity,
+    averageQuestionWeight,
+    averageFailureWeight,
+    criticalFailures,
+    recurrenceFailures: recurrence,
+    affectedSections,
+    weightedRiskClassification,
+    weightSourceBreakdown: sourceBreakdown,
+  };
+}
+
 function collectGroupStats(
   qaItems: QAItem[],
   grouping: DashboardGrouping,
@@ -1591,7 +1872,21 @@ function collectGroupStats(
 ): GroupInspectionStats[] {
   const grouped = new Map<
     string,
-    Omit<GroupInspectionStats, "ics" | "failureRate"> & { scoreSum: number; scoreCount: number }
+    {
+      group: string;
+      total: number;
+      evaluated: number;
+      failures: number;
+      nonFailures: number;
+      na: number;
+      undetermined: number;
+      criticalFailures: number;
+      scoreSum: number;
+      scoreCount: number;
+      sumApplicableWeight: number;
+      sumConformingWeight: number;
+      weightedFailures: number;
+    }
   >();
 
   for (const item of qaItems) {
@@ -1619,11 +1914,15 @@ function collectGroupStats(
       criticalFailures: 0,
       scoreSum: 0,
       scoreCount: 0,
+      sumApplicableWeight: 0,
+      sumConformingWeight: 0,
+      weightedFailures: 0,
     };
 
     current.total += 1;
     if (item.semanticResult === "real_failure") {
       current.failures += 1;
+      current.weightedFailures += item.weight ?? DEFAULT_WEIGHT;
       if (item.critical || (item.weight ?? 1) >= 4) {
         current.criticalFailures += 1;
       }
@@ -1636,6 +1935,10 @@ function collectGroupStats(
     }
     if (item.semanticResult === "real_failure" || item.semanticResult === "non_failure") {
       current.evaluated += 1;
+      current.sumApplicableWeight += item.weight ?? DEFAULT_WEIGHT;
+      if (item.semanticResult === "non_failure") {
+        current.sumConformingWeight += item.weight ?? DEFAULT_WEIGHT;
+      }
     }
     grouped.set(key, current);
   }
@@ -1644,7 +1947,26 @@ function collectGroupStats(
     .map((entry) => {
       const denominator = Math.max(entry.evaluated, 1);
       const failureRate = entry.failures / denominator;
-      const ics = clamp((1 - failureRate) * 100, 0, 100);
+      const icsSimple = clamp((1 - failureRate) * 100, 0, 100);
+      const icsWeighted = clamp(
+        entry.sumApplicableWeight > 0
+          ? (entry.sumConformingWeight / entry.sumApplicableWeight) * 100
+          : 0,
+        0,
+        100,
+      );
+      const weightedRiskScore =
+        (100 - icsWeighted) * 0.6 +
+        (entry.weightedFailures / Math.max(entry.evaluated, 1)) * 6 +
+        entry.criticalFailures * 6;
+      const weightedRiskLevel = classifyWeightedRisk({
+        icsWeighted,
+        weightedRiskScore,
+        criticalFailures: entry.criticalFailures,
+        recurrenceRate: failureRate,
+        affectedSections: entry.failures > 0 ? 1 : 0,
+        highRiskThemeHits: entry.criticalFailures,
+      });
       return {
         group: entry.group,
         total: entry.total,
@@ -1654,11 +1976,18 @@ function collectGroupStats(
         na: entry.na,
         undetermined: entry.undetermined,
         criticalFailures: entry.criticalFailures,
-        ics: sourceScore?.compliancePercentage ?? ics,
+        icsSimple: sourceScore?.compliancePercentage ?? icsSimple,
+        icsWeighted: sourceScore?.compliancePercentage ?? icsWeighted,
+        weightedFailures: entry.weightedFailures,
+        weightedFailureScore: entry.weightedFailures,
+        weightedRiskScore,
+        averageWeight:
+          entry.evaluated > 0 ? entry.sumApplicableWeight / entry.evaluated : DEFAULT_WEIGHT,
+        weightedRiskLevel,
         failureRate,
       };
     })
-    .sort((a, b) => b.ics - a.ics);
+    .sort((a, b) => b.icsWeighted - a.icsWeighted);
 }
 
 function toStatus(current: number, target?: number, invert = false): StatusLevel {
@@ -1702,6 +2031,7 @@ function buildCustomDashboards(args: {
   dataset: NormalizedDataset;
   qaItems: QAItem[];
   sourceScore?: SourceScoreSummary;
+  weightedSummary: WeightedMetricsSummary;
   configInput?: DashboardCustomizationConfig;
   shouldInspect: boolean;
 }): AnalysisResult["customDashboards"] {
@@ -1724,10 +2054,16 @@ function buildCustomDashboards(args: {
     },
     visibleSections: mergedVisibleSections,
     okrs: args.configInput?.okrs ?? [],
+    primaryIcsMetric: args.configInput?.primaryIcsMetric ?? "ponderado",
+    questionWeights: args.configInput?.questionWeights ?? [],
+    sectionWeights: args.configInput?.sectionWeights ?? [],
+    themeWeights: args.configInput?.themeWeights ?? [],
   };
 
-  const groupStats = collectGroupStats(args.qaItems, merged.grouping, args.sourceScore);
-  const scores = groupStats.map((entry) => entry.ics);
+  const weightedQaItems = applyConfiguredWeights(args.qaItems, merged);
+  const groupStats = collectGroupStats(weightedQaItems, merged.grouping, args.sourceScore);
+  const weightedSummary = args.weightedSummary;
+  const scores = groupStats.map((entry) => entry.icsWeighted);
   const icsMean = scores.length > 0 ? average(scores) : 0;
   const icsMin = scores.length > 0 ? Math.min(...scores) : 0;
   const icsMax = scores.length > 0 ? Math.max(...scores) : 0;
@@ -1739,7 +2075,7 @@ function buildCustomDashboards(args: {
   const totalEvaluated = groupStats.reduce((sum, entry) => sum + entry.evaluated, 0);
   const nonConformityPct = totalEvaluated > 0 ? (totalFailures / totalEvaluated) * 100 : 0;
   const naPct = totalInspections > 0 ? (totalNa / totalInspections) * 100 : 0;
-  const scoreMean = args.sourceScore?.compliancePercentage ?? icsMean;
+  const scoreMean = args.sourceScore?.compliancePercentage ?? weightedSummary.icsSimple;
 
   const kpiCurrent: Record<KpiKey, number> = {
     ics_medio: icsMean,
@@ -1792,27 +2128,50 @@ function buildCustomDashboards(args: {
 
   const sanitaryWidgets: DashboardWidget[] = [];
   if (args.shouldInspect && groupStats.length >= 2) {
+    const sortByRisk = [...groupStats].sort(
+      (a, b) =>
+        weightedRiskOrder(b.weightedRiskLevel) - weightedRiskOrder(a.weightedRiskLevel) ||
+        b.weightedFailureScore - a.weightedFailureScore ||
+        a.icsWeighted - b.icsWeighted ||
+        b.criticalFailures - a.criticalFailures,
+    );
     sanitaryWidgets.push({
       id: "sanitary-ics-by-group",
       title: `ICS por ${merged.grouping}`,
       description: "Comparação direta do índice de conformidade sanitária.",
       widgetType: "bar",
-      data: groupStats.map((entry) => ({ grupo: entry.group, ics: Number(entry.ics.toFixed(2)) })),
+      data: sortByRisk.map((entry) => ({
+        grupo: entry.group,
+        ics_simples: Number(entry.icsSimple.toFixed(2)),
+        ics_ponderado: Number(entry.icsWeighted.toFixed(2)),
+      })),
+      config: { xKey: "grupo", yKey: "ics_ponderado" },
+    });
+    sanitaryWidgets.push({
+      id: "sanitary-ics-simple-vs-weighted",
+      title: "Comparação ICS simples vs ICS ponderado",
+      description: "Diferença entre quantidade de conformidade e risco ponderado.",
+      widgetType: "bar",
+      data: sortByRisk.map((entry) => ({
+        grupo: entry.group,
+        ics_simples: Number(entry.icsSimple.toFixed(2)),
+        ics_ponderado: Number(entry.icsWeighted.toFixed(2)),
+      })),
       config: { xKey: "grupo", yKey: "ics" },
     });
     sanitaryWidgets.push({
       id: "sanitary-ranking",
       title: `Ranking sanitário por ${merged.grouping}`,
-      description: "Ordenação do melhor para o pior desempenho sanitário.",
+      description: "Ordenação por risco ponderado, peso e criticidade.",
       widgetType: "bar",
-      data: [...groupStats]
-        .sort((a, b) => b.ics - a.ics)
-        .slice(0, 12)
-        .map((entry) => ({ grupo: entry.group, ics: Number(entry.ics.toFixed(2)) })),
-      config: { xKey: "grupo", yKey: "ics" },
+      data: sortByRisk.slice(0, 12).map((entry) => ({
+        grupo: entry.group,
+        risco_ponderado: Number(entry.weightedRiskScore.toFixed(2)),
+      })),
+      config: { xKey: "grupo", yKey: "risco_ponderado" },
     });
     if (merged.grouping !== "periodo") {
-      const byPeriod = collectGroupStats(args.qaItems, "periodo", args.sourceScore);
+      const byPeriod = collectGroupStats(weightedQaItems, "periodo", args.sourceScore);
       if (byPeriod.length >= 2) {
         sanitaryWidgets.push({
           id: "sanitary-ics-trend",
@@ -1821,8 +2180,8 @@ function buildCustomDashboards(args: {
           widgetType: "line",
           data: byPeriod
             .sort((a, b) => (a.group > b.group ? 1 : -1))
-            .map((entry) => ({ periodo: entry.group, ics: Number(entry.ics.toFixed(2)) })),
-          config: { xKey: "periodo", yKey: "ics" },
+            .map((entry) => ({ periodo: entry.group, ics_ponderado: Number(entry.icsWeighted.toFixed(2)) })),
+          config: { xKey: "periodo", yKey: "ics_ponderado" },
         });
       }
     }
@@ -1832,7 +2191,7 @@ function buildCustomDashboards(args: {
       ["Grave", 0],
       ["Critica", 0],
     ]);
-    for (const item of args.qaItems) {
+    for (const item of weightedQaItems) {
       if (item.semanticResult !== "real_failure") continue;
       const severityLabel =
         (item.weight ?? 1) >= 5 || item.critical
@@ -1853,7 +2212,7 @@ function buildCustomDashboards(args: {
       config: { nameKey: "label", valueKey: "value" },
     });
     const bySection = countBy(
-      args.qaItems
+      weightedQaItems
         .filter((item) => item.semanticResult === "real_failure")
         .map((item) => item.section || "Sem seção"),
     );
@@ -1868,7 +2227,7 @@ function buildCustomDashboards(args: {
       });
     }
     const byQuestion = countBy(
-      args.qaItems
+      weightedQaItems
         .filter((item) => item.semanticResult === "real_failure")
         .map((item) => item.question),
     );
@@ -1885,19 +2244,81 @@ function buildCustomDashboards(args: {
     sanitaryWidgets.push({
       id: "sanitary-risky-groups",
       title: `${merged.grouping} com possível risco de multa/interdição`,
-      description: "Grupos com pior ICS e maior taxa de falha.",
+      description: "Classificação indicativa operacional baseada em risco ponderado.",
       widgetType: "table",
-      data: [...groupStats]
-        .sort((a, b) => a.ics - b.ics)
+      data: sortByRisk
         .slice(0, 10)
         .map((entry) => ({
           grupo: entry.group,
-          ics: Number(entry.ics.toFixed(2)),
-          "% falha": Number((entry.failureRate * 100).toFixed(2)),
+          ics_simples: Number(entry.icsSimple.toFixed(2)),
+          ics_ponderado: Number(entry.icsWeighted.toFixed(2)),
+          falhas_simples: entry.failures,
+          falhas_ponderadas: Number(entry.weightedFailures.toFixed(2)),
+          risco: Number(entry.weightedRiskScore.toFixed(2)),
+          nivel_risco: weightedRiskLabel(entry.weightedRiskLevel),
           criticas: entry.criticalFailures,
         })),
-      config: { columns: ["grupo", "ics", "% falha", "criticas"] },
+      config: {
+        columns: [
+          "grupo",
+          "ics_simples",
+          "ics_ponderado",
+          "falhas_simples",
+          "falhas_ponderadas",
+          "risco",
+          "nivel_risco",
+          "criticas",
+        ],
+      },
     });
+
+    const sectionWeighted = new Map<string, number>();
+    for (const item of weightedQaItems) {
+      if (item.semanticResult !== "real_failure") continue;
+      const key = item.section || "Sem seção";
+      sectionWeighted.set(key, (sectionWeighted.get(key) ?? 0) + (item.weight ?? DEFAULT_WEIGHT));
+    }
+    if (sectionWeighted.size > 0) {
+      sanitaryWidgets.push({
+        id: "sanitary-section-weighted-risk",
+        title: "Ranking de seções por criticidade ponderada",
+        description: "Seções com maior peso acumulado de falhas.",
+        widgetType: "bar",
+        data: topN(sectionWeighted, 12).map(([secao, risco_ponderado]) => ({
+          secao,
+          risco_ponderado: Number(risco_ponderado.toFixed(2)),
+        })),
+        config: { xKey: "secao", yKey: "risco_ponderado" },
+      });
+    }
+
+    const questionWeighted = new Map<string, { failures: number; weighted: number; weight: number }>();
+    for (const item of weightedQaItems) {
+      if (item.semanticResult !== "real_failure") continue;
+      const current = questionWeighted.get(item.question) ?? { failures: 0, weighted: 0, weight: item.weight };
+      current.failures += 1;
+      current.weighted += item.weight;
+      current.weight = Math.max(current.weight, item.weight);
+      questionWeighted.set(item.question, current);
+    }
+    if (questionWeighted.size > 0) {
+      sanitaryWidgets.push({
+        id: "sanitary-question-weight-frequency",
+        title: "Perguntas por peso x frequência de falhas",
+        description: "Impacto combina criticidade e recorrência.",
+        widgetType: "table",
+        data: [...questionWeighted.entries()]
+          .map(([pergunta, info]) => ({
+            pergunta,
+            frequencia_falha: info.failures,
+            peso_medio: Number((info.weighted / Math.max(info.failures, 1)).toFixed(2)),
+            impacto_ponderado: Number(info.weighted.toFixed(2)),
+          }))
+          .sort((a, b) => b.impacto_ponderado - a.impacto_ponderado)
+          .slice(0, 12),
+        config: { columns: ["pergunta", "frequencia_falha", "peso_medio", "impacto_ponderado"] },
+      });
+    }
   }
 
   const sanitaryPerformance = mergedVisibleSections.sanitaryPerformance
@@ -1912,45 +2333,46 @@ function buildCustomDashboards(args: {
 
   const riskRanking: Array<{
     group: string;
-    ics: number;
-    failureRate: number;
+    icsSimple: number;
+    icsWeighted: number;
+    simpleFailures: number;
+    weightedFailures: number;
+    averageWeight: number;
     criticalCount: number;
-    level: RiskLevel;
+    weightedRiskScore: number;
+    level: WeightedRiskLevel;
   }> = groupStats.map((entry) => {
-    const level: RiskLevel =
-      entry.ics < 50 || entry.criticalFailures >= 3
-        ? "possivel_interdicao"
-        : entry.ics < 70 || entry.criticalFailures >= 1
-          ? "possivel_multa"
-          : entry.ics < 85
-            ? "atencao"
-            : "baixo_risco";
+    const level = entry.weightedRiskLevel;
     return {
       group: entry.group,
-      ics: Number(entry.ics.toFixed(2)),
-      failureRate: Number((entry.failureRate * 100).toFixed(2)),
+      icsSimple: Number(entry.icsSimple.toFixed(2)),
+      icsWeighted: Number(entry.icsWeighted.toFixed(2)),
+      simpleFailures: entry.failures,
+      weightedFailures: Number(entry.weightedFailures.toFixed(2)),
+      averageWeight: Number(entry.averageWeight.toFixed(2)),
       criticalCount: entry.criticalFailures,
-      level: level as RiskLevel,
+      weightedRiskScore: Number(entry.weightedRiskScore.toFixed(2)),
+      level,
     };
   });
 
-  const riskCountsMap = new Map<RiskLevel, number>([
-    ["baixo_risco", 0],
+  const riskCountsMap = new Map<WeightedRiskLevel, number>([
+    ["regular", 0],
     ["atencao", 0],
-    ["possivel_multa", 0],
-    ["possivel_interdicao", 0],
+    ["risco_multa", 0],
+    ["risco_interdicao", 0],
   ]);
   for (const item of riskRanking) {
     riskCountsMap.set(item.level, (riskCountsMap.get(item.level) ?? 0) + 1);
   }
   const riskCounts: NonNullable<NonNullable<AnalysisResult["customDashboards"]>["risk"]>["counts"] = [
-    { level: "baixo_risco", label: "Baixo risco", count: riskCountsMap.get("baixo_risco") ?? 0 },
+    { level: "regular", label: "Regular", count: riskCountsMap.get("regular") ?? 0 },
     { level: "atencao", label: "Atenção", count: riskCountsMap.get("atencao") ?? 0 },
-    { level: "possivel_multa", label: "Possível risco de multa", count: riskCountsMap.get("possivel_multa") ?? 0 },
+    { level: "risco_multa", label: "Risco de multa", count: riskCountsMap.get("risco_multa") ?? 0 },
     {
-      level: "possivel_interdicao",
-      label: "Possível risco de interdição",
-      count: riskCountsMap.get("possivel_interdicao") ?? 0,
+      level: "risco_interdicao",
+      label: "Risco de interdição",
+      count: riskCountsMap.get("risco_interdicao") ?? 0,
     },
   ];
 
@@ -1959,12 +2381,17 @@ function buildCustomDashboards(args: {
         counts: riskCounts,
         ranking: riskRanking.sort((a, b) => {
           const order = {
-            possivel_interdicao: 4,
-            possivel_multa: 3,
+            risco_interdicao: 4,
+            risco_multa: 3,
             atencao: 2,
-            baixo_risco: 1,
-          } satisfies Record<RiskLevel, number>;
-          return order[b.level] - order[a.level] || a.ics - b.ics;
+            regular: 1,
+          } satisfies Record<WeightedRiskLevel, number>;
+          return (
+            order[b.level] - order[a.level] ||
+            b.weightedRiskScore - a.weightedRiskScore ||
+            a.icsWeighted - b.icsWeighted ||
+            b.criticalCount - a.criticalCount
+          );
         }),
         missingMessage:
           riskRanking.length === 0
@@ -2011,6 +2438,24 @@ function buildCustomDashboards(args: {
     sanitaryPerformance,
     okr,
     risk,
+    weightedComparison: {
+      icsSimple: Number(weightedSummary.icsSimple.toFixed(2)),
+      icsWeighted: Number(weightedSummary.icsWeighted.toFixed(2)),
+      weightedRiskScore: Number(weightedSummary.weightedRiskScore.toFixed(2)),
+      averageFailureWeight: Number(weightedSummary.averageFailureWeight.toFixed(2)),
+      weightedRiskClassification: weightedSummary.weightedRiskClassification,
+    },
+    weightTransparency: {
+      bySource: {
+        usuarioPergunta: weightedSummary.weightSourceBreakdown.usuario_pergunta,
+        usuarioSecao: weightedSummary.weightSourceBreakdown.usuario_secao,
+        usuarioTema: weightedSummary.weightSourceBreakdown.usuario_tema,
+        inferido: weightedSummary.weightSourceBreakdown.inferido,
+        default: weightedSummary.weightSourceBreakdown.default,
+      },
+      message:
+        "Pesos aplicados com prioridade: usuário por pergunta > usuário por seção > usuário por tema > inferência automática > peso padrão 1.",
+    },
   };
 }
 
@@ -2029,11 +2474,12 @@ export function analyzeDataset(
     inference.datasetType === "inspection_checklist" ||
     /inspection|checklist|inspe[cç][aã]o|safetyculture/i.test(parsed.fileName);
   const { items: qaItems } = shouldInspect
-    ? buildInspectionItems(normalized, inference, reviewConfig)
+    ? buildInspectionItems(normalized, inference, reviewConfig, dashboardConfigInput)
     : { items: [] as QAItem[] };
-  const weightedIssues = calculateWeightedIssues(qaItems);
-
   const sourceScoreSummary = buildSourceScoreSummary(normalized);
+  const weightedQaItems = applyConfiguredWeights(qaItems, dashboardConfigInput);
+  const weightedSummary = calculateWeightedMetricsSummary(weightedQaItems, sourceScoreSummary);
+  const weightedIssues = calculateWeightedIssues(weightedQaItems);
   const summaryCards = createSummaryCards(
     normalized,
     inference,
@@ -2042,7 +2488,7 @@ export function analyzeDataset(
     sourceScoreSummary,
   );
   const widgetCandidates = shouldInspect
-    ? createInspectionWidgets(qaItems, weightedIssues)
+    ? createInspectionWidgets(weightedQaItems, weightedIssues)
     : createDatasetWidgets(normalized, columnTypes, inference.datasetType);
   const { widgets, meta: dashboardMeta } = selectDashboardWidgets(widgetCandidates, {
     rowCount: normalized.rows.length,
@@ -2057,16 +2503,18 @@ export function analyzeDataset(
     inference,
     structure,
     columnTypes,
-    qaItems,
+    weightedQaItems,
     weightedIssues,
+    weightedSummary,
     dashboardMeta,
   );
   const alerts = createAlerts(
     normalized,
     inference,
     structure,
-    qaItems,
+    weightedQaItems,
     weightedIssues,
+    weightedSummary,
     dashboardMeta,
   );
   const preview = createDataPreview(normalized);
@@ -2106,6 +2554,7 @@ export function analyzeDataset(
     dataset: normalized,
     qaItems,
     sourceScore: sourceScoreSummary,
+    weightedSummary,
     configInput: dashboardConfigInput,
     shouldInspect,
   });
@@ -2163,6 +2612,21 @@ export function analyzeDataset(
             nonFailures: qaItems.filter((item) => item.semanticResult === "non_failure").length,
             notApplicable: qaItems.filter((item) => item.semanticResult === "na").length,
             undetermined: qaItems.filter((item) => item.semanticResult === "undetermined").length,
+            icsSimple: weightedSummary.icsSimple,
+            icsWeighted: weightedSummary.icsWeighted,
+            totalWeightedFailures: weightedSummary.totalWeightedFailures,
+            weightedRiskScore: weightedSummary.weightedRiskScore,
+            averageFailureSeverity: weightedSummary.averageFailureSeverity,
+            averageQuestionWeight: weightedSummary.averageQuestionWeight,
+            averageFailureWeight: weightedSummary.averageFailureWeight,
+            weightedRiskClassification: weightedSummary.weightedRiskClassification,
+            weightSourceSummary: {
+              usuarioPergunta: weightedSummary.weightSourceBreakdown.usuario_pergunta,
+              usuarioSecao: weightedSummary.weightSourceBreakdown.usuario_secao,
+              usuarioTema: weightedSummary.weightSourceBreakdown.usuario_tema,
+              inferido: weightedSummary.weightSourceBreakdown.inferido,
+              default: weightedSummary.weightSourceBreakdown.default,
+            },
             sourceScore: sourceScoreSummary,
             bySection: topN(
               countBy(

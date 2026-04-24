@@ -78,7 +78,11 @@ function createDefaultDashboardConfig(): DashboardCustomizationConfig {
   return {
     selectedKpis: KPI_OPTIONS.map((item) => item.key),
     grouping: "loja",
+    primaryIcsMetric: "ponderado",
     kpiTargets: {},
+    questionWeights: [],
+    sectionWeights: [],
+    themeWeights: [],
     visibleSections: {
       kpiOverview: true,
       sanitaryPerformance: true,
@@ -165,7 +169,7 @@ export default function HomePage() {
         mode,
         rules: reviewRules,
         dashboardConfig,
-        debug: false,
+        debugMode: false,
       };
       const response = await fetch("/api/analyze", {
         method: "POST",
@@ -431,6 +435,21 @@ export default function HomePage() {
               <option value="periodo">Período</option>
             </select>
           </label>
+          <label>
+            <span>Métrica prioritária de ICS</span>
+            <select
+              value={dashboardConfig.primaryIcsMetric ?? "ponderado"}
+              onChange={(event) =>
+                setDashboardConfig((prev) => ({
+                  ...prev,
+                  primaryIcsMetric: event.target.value as "simples" | "ponderado",
+                }))
+              }
+            >
+              <option value="ponderado">ICS ponderado por risco</option>
+              <option value="simples">ICS simples</option>
+            </select>
+          </label>
           <div style={{ display: "grid", gap: 8 }}>
             <strong>KPIs exibidos</strong>
             <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 8 }}>
@@ -490,6 +509,222 @@ export default function HomePage() {
                 </label>
               ))}
             </div>
+          </div>
+          <div className="card" style={{ padding: 12, display: "grid", gap: 8 }}>
+            <strong>Pesos por seção (1 a 5)</strong>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() =>
+                  setDashboardConfig((prev) => ({
+                    ...prev,
+                    sectionWeights: [...(prev.sectionWeights ?? []), { section: "Nova seção", weight: 1 }],
+                  }))
+                }
+              >
+                Adicionar seção
+              </button>
+            </div>
+            {(dashboardConfig.sectionWeights ?? []).map((item, idx) => (
+              <div
+                key={`section-weight-${idx}`}
+                style={{ display: "grid", gridTemplateColumns: "2fr 1fr auto", gap: 8, alignItems: "end" }}
+              >
+                <label>
+                  <span>Seção</span>
+                  <input
+                    type="text"
+                    value={item.section}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setDashboardConfig((prev) => {
+                        const next = [...(prev.sectionWeights ?? [])];
+                        next[idx] = { ...next[idx], section: value };
+                        return { ...prev, sectionWeights: next };
+                      });
+                    }}
+                  />
+                </label>
+                <label>
+                  <span>Peso</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={5}
+                    value={item.weight}
+                    onChange={(event) => {
+                      const numeric = Number(event.target.value);
+                      setDashboardConfig((prev) => {
+                        const next = [...(prev.sectionWeights ?? [])];
+                        next[idx] = {
+                          ...next[idx],
+                          weight: Number.isFinite(numeric) ? Math.max(1, Math.min(5, numeric)) : 1,
+                        };
+                        return { ...prev, sectionWeights: next };
+                      });
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() =>
+                    setDashboardConfig((prev) => {
+                      const next = [...(prev.sectionWeights ?? [])];
+                      next.splice(idx, 1);
+                      return { ...prev, sectionWeights: next };
+                    })
+                  }
+                >
+                  Remover
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="card" style={{ padding: 12, display: "grid", gap: 8 }}>
+            <strong>Pesos por tema/categoria (1 a 5)</strong>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() =>
+                  setDashboardConfig((prev) => ({
+                    ...prev,
+                    themeWeights: [...(prev.themeWeights ?? []), { theme: "Novo tema", weight: 1 }],
+                  }))
+                }
+              >
+                Adicionar tema
+              </button>
+            </div>
+            {(dashboardConfig.themeWeights ?? []).map((item, idx) => (
+              <div
+                key={`theme-weight-${idx}`}
+                style={{ display: "grid", gridTemplateColumns: "2fr 1fr auto", gap: 8, alignItems: "end" }}
+              >
+                <label>
+                  <span>Tema</span>
+                  <input
+                    type="text"
+                    value={item.theme}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setDashboardConfig((prev) => {
+                        const next = [...(prev.themeWeights ?? [])];
+                        next[idx] = { ...next[idx], theme: value };
+                        return { ...prev, themeWeights: next };
+                      });
+                    }}
+                  />
+                </label>
+                <label>
+                  <span>Peso</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={5}
+                    value={item.weight}
+                    onChange={(event) => {
+                      const numeric = Number(event.target.value);
+                      setDashboardConfig((prev) => {
+                        const next = [...(prev.themeWeights ?? [])];
+                        next[idx] = {
+                          ...next[idx],
+                          weight: Number.isFinite(numeric) ? Math.max(1, Math.min(5, numeric)) : 1,
+                        };
+                        return { ...prev, themeWeights: next };
+                      });
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() =>
+                    setDashboardConfig((prev) => {
+                      const next = [...(prev.themeWeights ?? [])];
+                      next.splice(idx, 1);
+                      return { ...prev, themeWeights: next };
+                    })
+                  }
+                >
+                  Remover
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="card" style={{ padding: 12, display: "grid", gap: 8 }}>
+            <strong>Pesos por pergunta (1 a 5)</strong>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={() =>
+                  setDashboardConfig((prev) => ({
+                    ...prev,
+                    questionWeights: [...(prev.questionWeights ?? []), { questionText: "Nova pergunta", weight: 1 }],
+                  }))
+                }
+              >
+                Adicionar pergunta
+              </button>
+            </div>
+            {(dashboardConfig.questionWeights ?? []).map((item, idx) => (
+              <div
+                key={`question-weight-${idx}`}
+                style={{ display: "grid", gridTemplateColumns: "2fr 1fr auto", gap: 8, alignItems: "end" }}
+              >
+                <label>
+                  <span>Pergunta</span>
+                  <input
+                    type="text"
+                    value={item.questionText}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setDashboardConfig((prev) => {
+                        const next = [...(prev.questionWeights ?? [])];
+                        next[idx] = { ...next[idx], questionText: value };
+                        return { ...prev, questionWeights: next };
+                      });
+                    }}
+                  />
+                </label>
+                <label>
+                  <span>Peso</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={5}
+                    value={item.weight}
+                    onChange={(event) => {
+                      const numeric = Number(event.target.value);
+                      setDashboardConfig((prev) => {
+                        const next = [...(prev.questionWeights ?? [])];
+                        next[idx] = {
+                          ...next[idx],
+                          weight: Number.isFinite(numeric) ? Math.max(1, Math.min(5, numeric)) : 1,
+                        };
+                        return { ...prev, questionWeights: next };
+                      });
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={() =>
+                    setDashboardConfig((prev) => {
+                      const next = [...(prev.questionWeights ?? [])];
+                      next.splice(idx, 1);
+                      return { ...prev, questionWeights: next };
+                    })
+                  }
+                >
+                  Remover
+                </button>
+              </div>
+            ))}
           </div>
           <div style={{ display: "grid", gap: 8 }}>
             <strong>Seções visíveis</strong>

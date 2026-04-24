@@ -51,6 +51,7 @@ const kpiKeySchema = z.enum([
 const dashboardConfigSchema = z.object({
   selectedKpis: z.array(kpiKeySchema).default([]),
   grouping: z.enum(["loja", "setor", "template", "periodo"]).default("loja"),
+  primaryIcsMetric: z.enum(["simples", "ponderado"]).optional(),
   kpiTargets: z
     .object({
       ics_medio: z.number().optional(),
@@ -64,6 +65,30 @@ const dashboardConfigSchema = z.object({
       score_medio: z.number().optional(),
       quantidade_inspecoes: z.number().optional(),
     })
+    .optional(),
+  questionWeights: z
+    .array(
+      z.object({
+        questionText: z.string().min(1),
+        weight: z.number().min(1).max(5),
+      }),
+    )
+    .optional(),
+  sectionWeights: z
+    .array(
+      z.object({
+        section: z.string().min(1),
+        weight: z.number().min(1).max(5),
+      }),
+    )
+    .optional(),
+  themeWeights: z
+    .array(
+      z.object({
+        theme: z.string().min(1),
+        weight: z.number().min(1).max(5),
+      }),
+    )
     .optional(),
   visibleSections: z
     .object({

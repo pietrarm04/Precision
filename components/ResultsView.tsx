@@ -89,6 +89,46 @@ export function ResultsView({ result }: Props) {
       {custom?.kpiOverview && (
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Dashboard de KPIs</h3>
+          {custom.weightedComparison && (
+            <div
+              className="card"
+              style={{
+                padding: 12,
+                marginBottom: 10,
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                gap: 8,
+              }}
+            >
+              <div>
+                <strong>ICS simples</strong>
+                <div style={{ fontSize: 24, fontWeight: 700, marginTop: 4 }}>
+                  {custom.weightedComparison.icsSimple.toFixed(1)}%
+                </div>
+              </div>
+              <div>
+                <strong>ICS ponderado</strong>
+                <div style={{ fontSize: 24, fontWeight: 700, marginTop: 4 }}>
+                  {custom.weightedComparison.icsWeighted.toFixed(1)}%
+                </div>
+              </div>
+              <div>
+                <strong>Score de risco ponderado</strong>
+                <div style={{ fontSize: 24, fontWeight: 700, marginTop: 4 }}>
+                  {custom.weightedComparison.weightedRiskScore.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <strong>Peso médio das falhas</strong>
+                <div style={{ fontSize: 24, fontWeight: 700, marginTop: 4 }}>
+                  {custom.weightedComparison.averageFailureWeight.toFixed(2)}
+                </div>
+              </div>
+            </div>
+          )}
+          {custom.weightTransparency && (
+            <p style={{ marginTop: 0, color: "var(--muted)" }}>{custom.weightTransparency.message}</p>
+          )}
           {custom.kpiOverview.cards.length > 0 ? (
             <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
               {custom.kpiOverview.cards.map((card) => {
@@ -137,6 +177,9 @@ export function ResultsView({ result }: Props) {
       {custom?.risk && (
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Painel de risco sanitário</h3>
+          <p style={{ marginTop: 0, color: "var(--muted)" }}>
+            Classificação indicativa operacional de risco (não substitui decisão legal ou regulatória).
+          </p>
           {custom.risk.ranking.length > 0 ? (
             <>
               <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
@@ -153,8 +196,12 @@ export function ResultsView({ result }: Props) {
                     <tr>
                       <th>Grupo</th>
                       <th>Nível de risco</th>
-                      <th>ICS</th>
-                      <th>% falha</th>
+                      <th>ICS simples</th>
+                      <th>ICS ponderado</th>
+                      <th>Falhas simples</th>
+                      <th>Falhas ponderadas</th>
+                      <th>Peso médio</th>
+                      <th>Score risco</th>
                       <th>Críticas</th>
                     </tr>
                   </thead>
@@ -163,8 +210,12 @@ export function ResultsView({ result }: Props) {
                       <tr key={`${item.group}-${item.level}`}>
                         <td>{item.group}</td>
                         <td>{item.level.replaceAll("_", " ")}</td>
-                        <td>{item.ics.toFixed(2)}</td>
-                        <td>{item.failureRate.toFixed(2)}%</td>
+                        <td>{item.icsSimple.toFixed(2)}%</td>
+                        <td>{item.icsWeighted.toFixed(2)}%</td>
+                        <td>{item.simpleFailures}</td>
+                        <td>{item.weightedFailures.toFixed(2)}</td>
+                        <td>{item.averageWeight.toFixed(2)}</td>
+                        <td>{item.weightedRiskScore.toFixed(2)}</td>
                         <td>{item.criticalCount}</td>
                       </tr>
                     ))}
