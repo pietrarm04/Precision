@@ -84,7 +84,6 @@ type UploadedUnit = {
   id: string;
   file: File;
   unitLabel: string;
-  includeInComparison: boolean;
 };
 
 type BatchAnalyzeResponse = {
@@ -116,7 +115,6 @@ function makeUploadedUnit(file: File): UploadedUnit {
     id: `${fileFingerprint(file)}__${entropy}`,
     file,
     unitLabel: defaultUnitLabel(file.name),
-    includeInComparison: true,
   };
 }
 
@@ -140,17 +138,15 @@ export default function HomePage() {
     createDefaultDashboardConfig(),
   );
 
-  const processableUnits = uploadedUnits.filter(
-    (item) => item.includeInComparison && isValidTabularFile(item.file),
-  );
-  const hasAnyProcessableFile = processableUnits.length > 0;
+  const hasAnyUploadedFile = uploadedUnits.length > 0;
 
   const fileInfo = useMemo(() => {
     if (uploadedUnits.length === 0) {
       return null;
     }
     const totalKb = uploadedUnits.reduce((sum, item) => sum + item.file.size / 1024, 0);
-    return `${uploadedUnits.length} arquivo(s) selecionado(s) · ${totalKb.toFixed(1)} KB`;
+    const label = uploadedUnits.length === 1 ? "arquivo selecionado" : "arquivos selecionados";
+    return `${uploadedUnits.length} ${label} · ${totalKb.toFixed(1)} KB`;
   }, [uploadedUnits]);
 
   async function runAnalysis(mode: "quick" | "reviewed", reviewRules?: ManualReviewConfig) {
@@ -162,13 +158,12 @@ export default function HomePage() {
       data: {
         mode,
         selectedUnits: uploadedUnits.length,
-        processableUnits: processableUnits.length,
         loading,
       },
       timestamp: 0,
     });
     // #endregion
-    if (!hasAnyProcessableFile) {
+    if (!hasAnyUploadedFile) {
       // #region agent log
       appendClientDebugLog({
         hypothesisId: "C",
@@ -185,9 +180,9 @@ export default function HomePage() {
     setError(null);
     setDebugJson(null);
     try {
-      const total = processableUnits.length;
+      const total = uploadedUnits.length;
       setProcessingProgress({ current: 0, total });
-      const batch = await runBatchAnalysis(processableUnits, mode, reviewRules);
+      const batch = await runBatchAnalysis(uploadedUnits, mode, reviewRules);
       setProcessingProgress({ current: total, total });
       const unitResults = batch.results.map((item) => ({
         unitId: item.unitId ?? `${item.fileName}-${item.unit}`,
@@ -255,15 +250,15 @@ export default function HomePage() {
       location: "app/page.tsx:state-effect",
       message: "State snapshot updated",
       data: {
-        hasSelectedFile: hasAnyProcessableFile,
+        hasSelectedFile: hasAnyUploadedFile,
         selectedFileSize: uploadedUnits[0]?.file.size ?? null,
         loading,
-        derivedDisabled: !hasAnyProcessableFile || loading,
+        derivedDisabled: !hasAnyUploadedFile || loading,
       },
       timestamp: 0,
     });
     // #endregion
-  }, [uploadedUnits, hasAnyProcessableFile, loading, dashboardConfig]);
+  }, [uploadedUnits, hasAnyUploadedFile, loading, dashboardConfig]);
 
   useEffect(() => {
     async function loadSampleFiles() {
@@ -495,7 +490,7 @@ export default function HomePage() {
         {fileInfo && (
           <div style={{ color: "var(--muted)", display: "flex", justifyContent: "space-between", gap: 8 }}>
             <span>{fileInfo}</span>
-            <span>{processableUnits.length} marcado(s) para comparação</span>
+            <span>{uploadedUnits.length} selecionado(s) para processamento</span>
           </div>
         )}
         {uploadedUnits.length > 0 && (
@@ -514,21 +509,7 @@ export default function HomePage() {
                     alignItems: "center",
                   }}
                 >
-                  <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <input
-                      type="checkbox"
-                      checked={unit.includeInComparison}
-                      onChange={(event) =>
-                        setUploadedUnits((prev) =>
-                          prev.map((item) =>
-                            item.id === unit.id ? { ...item, includeInComparison: event.target.checked } : item,
-                          ),
-                        )
-                      }
-                      style={{ width: "auto" }}
-                    />
-                    Comparar
-                  </label>
+                  <span style={{ color: "var(--muted)", fontSize: 12 }}>Arquivo</span>
                   <label style={{ margin: 0 }}>
                     <span style={{ display: "block", fontSize: 12, color: "var(--muted)" }}>{unit.file.name}</span>
                     <input
@@ -1096,7 +1077,7 @@ export default function HomePage() {
             className="btn"
             onClick={() => {
               const mode = quickMode ? "quick" : "reviewed";
-              const derivedDisabled = !hasAnyProcessableFile || loading;
+              const derivedDisabled = !hasAnyUploadedFile || loading;
               const timestamp = performance.now();
               // #region agent log
               appendClientDebugLog({
@@ -1106,7 +1087,7 @@ export default function HomePage() {
                 data: {
                   mode,
                   selectedCount: uploadedUnits.length,
-                  processableCount: processableUnits.length,
+                  processableCount: uploadedUnits.length,
                   loading,
                   derivedDisabled,
                 },
@@ -1118,16 +1099,16 @@ export default function HomePage() {
               }
               void runAnalysis(mode, quickMode ? undefined : rules ?? undefined);
             }}
-            disabled={!hasAnyProcessableFile || loading}
+            disabled={!hasAnyUploadedFile || loading}
           >
             {loading
-              ? `Processando ${processingProgress?.current ?? 0} de ${processingProgress?.total ?? processableUnits.length} arquivos...`
+              ? `Processando ${processingProgress?.current ?? 0} de ${processingProgress?.total ?? uploadedUnits.length} arquivos...`
               : "Processar arquivos"}
           </button>
         </div>
         {loading && (
           <div className="pill">
-            Processando {processingProgress?.current ?? 0} de {processingProgress?.total ?? processableUnits.length} arquivos...
+            Processando {processingProgress?.current ?? 0} de {processingProgress?.total ?? uploadedUnits.length} arquivos...
           </div>
         )}
         {error && (
