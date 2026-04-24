@@ -147,12 +147,22 @@ function buildSummaryText(result: AnalysisResult): string {
   const qaSnippet = result.qaAnalysis
     ? `Itens de inspecao: ${result.qaAnalysis.totalItems}; falhas reais: ${result.qaAnalysis.realFailures}.`
     : "Leitura geral sem modulo de checklist aplicado.";
+  const officialScoreSnippet = result.sourceScore
+    ? `Pontuacao oficial do arquivo: ${result.sourceScore.score}/${result.sourceScore.totalScore} (${result.sourceScore.compliancePercentage.toFixed(1)}%).`
+    : null;
+  const calculatedIcsSnippet = result.qaAnalysis
+    ? `ICS calculado pelo sistema: ${result.qaAnalysis.ics.toFixed(1)}% (Sim / (Sim + Nao)).`
+    : null;
 
   return [
     `Dataset inferido: ${result.datasetType} com confianca de ${confidence}%.`,
     `Volume: ${result.rowCount} linhas e ${result.columnCount} colunas.`,
     `Qualidade estrutural: ${quality}.`,
     qaSnippet,
+    officialScoreSnippet,
+    calculatedIcsSnippet,
     `Destaque: ${firstInsight}`,
-  ].join(" ");
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(" ");
 }

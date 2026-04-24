@@ -12,7 +12,6 @@ import {
   ParsedTabularFile,
   QAItem,
   QAOutcome,
-  SemanticQuestionPolarity,
   SourceScoreSummary,
   WeightedIssue,
 } from "@/lib/types";
@@ -67,7 +66,7 @@ const yesTokens = ["sim", "yes", "y", "true", "1"];
 const noTokens = ["nao", "não", "no", "n", "false", "0"];
 const inspectionPrefixRegex = /^inspection(?:[_\s-]|$)/i;
 const inspectionIgnoredCoreRegex =
-  /(^|_)(auditid|audit_id|score|totalscore|total_score|title_page|titlepage|title|page_title)(_|$)/i;
+  /(^|_)(auditid|audit_id|auditname|audit_name|templateid|template_id|author|owner|start|completed|lastupdate|last_update|score|totalscore|total_score|classification|classificacao|classificação|title_page|titlepage|page_title)(_|$)/i;
 
 const defaultIgnoredRegex = /(coment[aá]rio|evid[eê]ncia|foto|anexo|assinatura|observa[cç][aã]o)/i;
 
@@ -122,7 +121,6 @@ type GroupInspectionStats = {
   failures: number;
   nonFailures: number;
   na: number;
-  undetermined: number;
   criticalFailures: number;
   ics: number;
   failureRate: number;
@@ -186,28 +184,36 @@ function parseAsOutcome(rawValue: unknown): QAOutcome {
   if (naTokens.some((token) => normalized === token || normalized.includes(token))) {
     return "na";
   }
-  if (statusPassTokens.some((token) => normalized.includes(token))) {
-    return "pass";
+  if (noTokens.includes(normalized)) {
+    return "no";
   }
   if (statusFailTokens.some((token) => normalized.includes(token))) {
     return "fail";
   }
+  if (statusPassTokens.some((token) => normalized.includes(token))) {
+    return "pass";
+  }
   if (yesTokens.includes(normalized)) {
     return "yes";
-  }
-  if (noTokens.includes(normalized)) {
-    return "no";
   }
   return "unknown";
 }
 
 function normalizeInspectionHeaderCore(header: string): string {
-  const normalized = header
-    .trim()
+  return header.trim().toLowerCase().replace(/^inspection(?:[_\s-]+)?/, "");
+}
+
+function normalizeSectionLabel(rawSection: string): string {
+  let section = rawSection
     .toLowerCase()
-    .replace(/[\s-]+/g, "_")
-    .replace(/^inspection(?:_+)?/, "");
-  return normalized;
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!section) return "sem secao";
+  section = section.replace(/^sanitarios\s+e\s+alojamento.*$/i, "sanitarios");
+  section = section.replace(/^sanitario\s+para\s+os?\s+clientes?.*$/i, "sanitario cliente");
+  return section || "sem secao";
 }
 
 function isInspectionQuestionColumn(header: string): boolean {
@@ -215,13 +221,14 @@ function isInspectionQuestionColumn(header: string): boolean {
     return false;
   }
   const core = normalizeInspectionHeaderCore(header);
-  if (!core) {
+  const normalizedCore = core.replace(/[\s-]+/g, "_");
+  if (!normalizedCore) {
     return false;
   }
-  if (core.endsWith("_note") || core.endsWith("_notes")) {
+  if (normalizedCore.endsWith("_note") || normalizedCore.endsWith("_notes")) {
     return false;
   }
-  if (inspectionIgnoredCoreRegex.test(core)) {
+  if (inspectionIgnoredCoreRegex.test(normalizedCore)) {
     return false;
   }
   return true;
@@ -229,19 +236,22 @@ function isInspectionQuestionColumn(header: string): boolean {
 
 function deriveSectionAndQuestionFromInspectionColumn(header: string): { section: string; question: string } {
   const core = normalizeInspectionHeaderCore(header);
-  const tokens = core.split("_").filter(Boolean);
-  const toLabel = (value: string) => value.replace(/_/g, " ").replace(/\s+/g, " ").trim();
-
-  const sectionToken = tokens[0] ?? "sem_secao";
-  const questionToken = tokens.slice(1).join("_") || core || sectionToken;
+  const separatorIndex = core.indexOf("_");
+  const sectionPart = separatorIndex >= 0 ? core.slice(0, separatorIndex) : core;
+  const questionPart = separatorIndex >= 0 ? core.slice(separatorIndex + 1) : core;
+  const toQuestion = (value: string) => value.replace(/_/g, " ").replace(/\s+/g, " ").trim();
 
   return {
-    section: toLabel(sectionToken) || "Sem secao",
-    question: toLabel(questionToken) || "(pergunta nao identificada)",
+    section: normalizeSectionLabel(sectionPart),
+    question: toQuestion(questionPart) || "(pergunta nao identificada)",
   };
 }
 
-function mapWideInspectionSemanticResult(outcome: QAOutcome, responseRaw: string): "real_failure" | "non_failure" | "na" | "undetermined" {
+function mapWideInspectionSemanticResult(outcome: QAOutcome, responseRaw: string): "real_failure" | "non_failure" | "na" {
+  return applySemanticRule(outcome, responseRaw);
+}
+
+function applySemanticRule(outcome: QAOutcome, responseRaw: string): "real_failure" | "non_failure" | "na" {
   if (isMissing(responseRaw)) {
     return "na";
   }
@@ -254,116 +264,7 @@ function mapWideInspectionSemanticResult(outcome: QAOutcome, responseRaw: string
   if (outcome === "fail" || outcome === "no") {
     return "real_failure";
   }
-  return "undetermined";
-}
-
-function inferQuestionPolarity(question: string): SemanticQuestionPolarity {
-  const q = question.toLowerCase();
-  const negativeClues = [
-    "vazamento",
-    "odor",
-    "praga",
-    "risco",
-    "dano",
-    "contamin",
-    "obstr",
-    "defeito",
-    "sujeira",
-    "falha",
-    "nao conforme",
-    "não conforme",
-    "incidente",
-  ];
-  const positiveClues = [
-    "conforme",
-    "limpo",
-    "adequado",
-    "organizado",
-    "funcionando",
-    "em ordem",
-    "disponivel",
-    "disponível",
-    "seguro",
-    "completo",
-    "correto",
-  ];
-
-  if (negativeClues.some((clue) => q.includes(clue))) {
-    return "negative";
-  }
-  if (positiveClues.some((clue) => q.includes(clue))) {
-    return "positive";
-  }
-  if (q.includes("ausencia") || q.includes("ausência")) {
-    return "negative";
-  }
-  if (q.includes("existe") || q.startsWith("ha ") || q.startsWith("há ")) {
-    return "negative";
-  }
-  return "neutral";
-}
-
-function applySemanticRule(
-  questionPolarity: SemanticQuestionPolarity,
-  outcome: QAOutcome,
-  responseRaw: string,
-): "real_failure" | "non_failure" | "na" | "undetermined" {
-  if (outcome === "na") {
-    return "na";
-  }
-  if (outcome === "unknown") {
-    return "undetermined";
-  }
-  if (outcome === "fail") {
-    return "real_failure";
-  }
-  if (outcome === "pass") {
-    return "non_failure";
-  }
-  if (outcome === "yes") {
-    if (questionPolarity === "negative") {
-      return "real_failure";
-    }
-    return "non_failure";
-  }
-  if (outcome === "no") {
-    if (questionPolarity === "positive") {
-      return "real_failure";
-    }
-    return "non_failure";
-  }
-  if (responseRaw.toLowerCase().includes("não conforme") || responseRaw.toLowerCase().includes("nao conforme")) {
-    return "real_failure";
-  }
-  return "undetermined";
-}
-
-function resolveQuestionType(
-  question: string,
-  outcome: QAOutcome,
-  config: ManualReviewConfig | undefined,
-): SemanticQuestionPolarity {
-  const byQuestion = config?.questionOverrides.find((entry) => entry.questionText === question);
-  if (byQuestion && byQuestion.behavior !== "ignore") {
-    return byQuestion.behavior;
-  }
-  const defaultMode = config?.binaryInterpretationMode ?? "auto";
-  if (defaultMode === "treat_no_as_failure") {
-    return "positive";
-  }
-  if (defaultMode === "treat_yes_as_failure_for_negative_questions") {
-    const inferred = inferQuestionPolarity(question);
-    if (inferred !== "neutral") {
-      return inferred;
-    }
-  }
-  if (defaultMode === "treat_yes_as_positive") {
-    return "positive";
-  }
-  if (outcome === "yes" || outcome === "no") {
-    return inferQuestionPolarity(question);
-  }
-  return inferQuestionPolarity(question);
+  return "na";
 }
 
 function questionIsIgnored(question: string, config: ManualReviewConfig | undefined): boolean {
@@ -453,7 +354,7 @@ function buildInspectionItems(
           normalizedOutcome: outcome,
           section,
           date: dateCol ? toStringValue(row[dateCol]) : undefined,
-          semanticPolarity: resolveQuestionType(question, outcome, config),
+          semanticPolarity: "neutral",
           semanticResult: semantics,
           critical: criticalOverride,
           weight,
@@ -481,8 +382,7 @@ function buildInspectionItems(
     }
 
     const outcome = parseAsOutcome(responseRaw);
-    const polarity = resolveQuestionType(question, outcome, config);
-    const semantics = applySemanticRule(polarity, outcome, responseRaw);
+    const semantics = applySemanticRule(outcome, responseRaw);
     const section = sectionCol ? toStringValue(row[sectionCol]).trim() : "";
     const criticalOverride = config?.questionOverrides.find((q) => q.questionText === question)?.critical ?? false;
     const weight = questionWeight(question, section || undefined, config);
@@ -493,7 +393,7 @@ function buildInspectionItems(
       normalizedOutcome: outcome,
       section: section || undefined,
       date: dateCol ? toStringValue(row[dateCol]) : undefined,
-      semanticPolarity: polarity,
+      semanticPolarity: "neutral",
       semanticResult: semantics,
       critical: criticalOverride,
       weight,
@@ -765,11 +665,19 @@ function createSummaryCards(
   }
   if (qaItems.length > 0) {
     const failures = qaItems.filter((item) => item.semanticResult === "real_failure").length;
+    const conforming = qaItems.filter((item) => item.semanticResult === "non_failure").length;
     const na = qaItems.filter((item) => item.semanticResult === "na").length;
+    const evaluatedAnswers = failures + conforming;
+    const calculatedIcs = clamp((1 - failures / Math.max(evaluatedAnswers, 1)) * 100, 0, 100);
     cards.push({
       label: "Falhas reais",
       value: `${failures} (${qaItems.length > 0 ? Math.round((failures / qaItems.length) * 100) : 0}%)`,
       emphasis: failures / Math.max(qaItems.length, 1) > 0.2 ? "danger" : "default",
+    });
+    cards.push({
+      label: "ICS calculado",
+      value: `${calculatedIcs.toFixed(1)}%`,
+      emphasis: calculatedIcs < 70 ? "warning" : "success",
     });
     cards.push({
       label: "Nao aplicavel",
@@ -787,19 +695,17 @@ function createInspectionWidgets(qaItems: QAItem[], weightedIssues: WeightedIssu
   const failures = qaItems.filter((i) => i.semanticResult === "real_failure").length;
   const nonFailures = qaItems.filter((i) => i.semanticResult === "non_failure").length;
   const na = qaItems.filter((i) => i.semanticResult === "na").length;
-  const und = qaItems.filter((i) => i.semanticResult === "undetermined").length;
 
   if (total > 0) {
     widgets.push({
       id: "inspection-outcome-breakdown",
       title: "Distribuicao de resultado interpretado",
-      description: "Classificacao semantica entre falha real, conformidade, NA e indeterminado.",
+      description: "Classificacao entre falha real, conformidade e NA.",
       widgetType: "bar",
       data: [
         { label: "Falha real", value: failures },
         { label: "Conforme", value: nonFailures },
         { label: "Nao aplicavel", value: na },
-        { label: "Indeterminado", value: und },
       ],
       config: { xKey: "label", yKey: "value" },
     });
@@ -1377,10 +1283,6 @@ function createDataPreview(dataset: NormalizedDataset, limit = 12): Record<strin
 }
 
 function findSourceScoreColumns(dataset: NormalizedDataset): { scoreColumn?: string; totalScoreColumn?: string } {
-  if (dataset.headers.some(isInspectionQuestionColumn)) {
-    return {};
-  }
-
   const byKeyword = (pattern: RegExp, excludes?: RegExp) =>
     dataset.headers.find((header) => {
       const normalized = header.toLowerCase();
@@ -1460,7 +1362,9 @@ function calculateWeightedIssues(qaItems: QAItem[]): WeightedIssue[] {
       weight: item.weight ?? DEFAULT_WEIGHT,
       critical: item.critical,
     };
-    current.total += 1;
+    if (item.semanticResult !== "na") {
+      current.total += 1;
+    }
     if (item.semanticResult === "real_failure") {
       current.failures += 1;
     }
@@ -1624,11 +1528,7 @@ function createAlerts(
     alerts.push("Base pequena para inferencias robustas; resultados devem ser lidos com cautela.");
   }
   if (qaItems.length > 0) {
-    const undetermined = qaItems.filter((item) => item.semanticResult === "undetermined").length;
     const naCount = qaItems.filter((item) => item.semanticResult === "na").length;
-    if (undetermined / qaItems.length > 0.2) {
-      alerts.push("Muitas respostas com interpretacao indeterminada; recomendada revisao manual de perguntas.");
-    }
     if (naCount / qaItems.length > 0.3) {
       alerts.push("Percentual elevado de 'nao aplicavel' pode mascarar problemas operacionais.");
     }
@@ -1648,31 +1548,17 @@ function createAlerts(
 }
 
 function buildRecommendationsForReview(qaItems: QAItem[]): ManualReviewConfig["questionOverrides"] {
-  const byQuestion = new Map<
-    string,
-    {
-      question: string;
-      total: number;
-      undetermined: number;
-      inferred: SemanticQuestionPolarity;
-    }
-  >();
+  const byQuestion = new Map<string, { question: string; inferred: QAItem["semanticPolarity"] }>();
   for (const item of qaItems) {
     const current = byQuestion.get(item.question) ?? {
       question: item.question,
-      total: 0,
-      undetermined: 0,
       inferred: item.semanticPolarity,
     };
-    current.total += 1;
-    if (item.semanticResult === "undetermined") {
-      current.undetermined += 1;
-    }
     byQuestion.set(item.question, current);
   }
 
   return [...byQuestion.values()]
-    .filter((q) => q.undetermined > 0 || q.inferred === "neutral")
+    .filter((q) => q.inferred === "neutral")
     .slice(0, 20)
     .map((q) => ({
       questionText: q.question,
@@ -1680,14 +1566,13 @@ function buildRecommendationsForReview(qaItems: QAItem[]): ManualReviewConfig["q
       includeInAnalysis: true,
       weight: 1,
       critical: false,
-      reason: q.undetermined > 0 ? "Resposta ambigua recorrente" : "Pergunta com polaridade pouco clara",
+      reason: "Pergunta com polaridade pouco clara",
     }));
 }
 
 function collectGroupStats(
   qaItems: QAItem[],
   grouping: DashboardGrouping,
-  sourceScore?: SourceScoreSummary,
 ): GroupInspectionStats[] {
   const grouped = new Map<
     string,
@@ -1715,13 +1600,14 @@ function collectGroupStats(
       failures: 0,
       nonFailures: 0,
       na: 0,
-      undetermined: 0,
       criticalFailures: 0,
       scoreSum: 0,
       scoreCount: 0,
     };
 
-    current.total += 1;
+    if (item.semanticResult !== "na") {
+      current.total += 1;
+    }
     if (item.semanticResult === "real_failure") {
       current.failures += 1;
       if (item.critical || (item.weight ?? 1) >= 4) {
@@ -1731,8 +1617,6 @@ function collectGroupStats(
       current.nonFailures += 1;
     } else if (item.semanticResult === "na") {
       current.na += 1;
-    } else {
-      current.undetermined += 1;
     }
     if (item.semanticResult === "real_failure" || item.semanticResult === "non_failure") {
       current.evaluated += 1;
@@ -1752,9 +1636,8 @@ function collectGroupStats(
         failures: entry.failures,
         nonFailures: entry.nonFailures,
         na: entry.na,
-        undetermined: entry.undetermined,
         criticalFailures: entry.criticalFailures,
-        ics: sourceScore?.compliancePercentage ?? ics,
+        ics,
         failureRate,
       };
     })
@@ -1826,7 +1709,7 @@ function buildCustomDashboards(args: {
     okrs: args.configInput?.okrs ?? [],
   };
 
-  const groupStats = collectGroupStats(args.qaItems, merged.grouping, args.sourceScore);
+  const groupStats = collectGroupStats(args.qaItems, merged.grouping);
   const scores = groupStats.map((entry) => entry.ics);
   const icsMean = scores.length > 0 ? average(scores) : 0;
   const icsMin = scores.length > 0 ? Math.min(...scores) : 0;
@@ -1912,7 +1795,7 @@ function buildCustomDashboards(args: {
       config: { xKey: "grupo", yKey: "ics" },
     });
     if (merged.grouping !== "periodo") {
-      const byPeriod = collectGroupStats(args.qaItems, "periodo", args.sourceScore);
+      const byPeriod = collectGroupStats(args.qaItems, "periodo");
       if (byPeriod.length >= 2) {
         sanitaryWidgets.push({
           id: "sanitary-ics-trend",
@@ -2132,11 +2015,10 @@ export function analyzeDataset(
     ? buildInspectionItems(normalized, inference, reviewConfig)
     : { items: [] as QAItem[] };
   const weightedIssues = calculateWeightedIssues(qaItems);
-  const totalItems = qaItems.length;
+  const totalItems = qaItems.filter((item) => item.semanticResult !== "na").length;
   const realFailures = qaItems.filter((item) => item.semanticResult === "real_failure").length;
   const conformingAnswers = qaItems.filter((item) => item.semanticResult === "non_failure").length;
   const notApplicable = qaItems.filter((item) => item.semanticResult === "na").length;
-  const undetermined = qaItems.filter((item) => item.semanticResult === "undetermined").length;
   const evaluatedAnswers = realFailures + conformingAnswers;
   const ics = clamp((1 - realFailures / Math.max(evaluatedAnswers, 1)) * 100, 0, 100);
   const failuresBySection = topN(
@@ -2156,7 +2038,7 @@ export function analyzeDataset(
     20,
   ).map(([question, total]) => ({ question, total }));
 
-  const sourceScoreSummary = shouldInspect ? undefined : buildSourceScoreSummary(normalized);
+  const sourceScoreSummary = buildSourceScoreSummary(normalized);
   const summaryCards = createSummaryCards(
     normalized,
     inference,
@@ -2224,6 +2106,16 @@ export function analyzeDataset(
       summaryTextParts.push("Nenhuma nao conformidade identificada. Pontuacao maxima atingida.");
     }
   }
+  if (qaItems.length > 0) {
+    summaryTextParts.push(
+      `Pontuacao oficial do arquivo: ${
+        sourceScoreSummary ? `${sourceScoreSummary.score}/${sourceScoreSummary.totalScore}` : "nao disponivel"
+      }.`,
+    );
+    summaryTextParts.push(
+      `ICS calculado pelo sistema: ${ics.toFixed(1)}% (Sim / (Sim + Não) = ${conformingAnswers}/${evaluatedAnswers}).`,
+    );
+  }
   const mergedSummaryText = summaryTextParts.join(" ");
   const customDashboards = buildCustomDashboards({
     dataset: normalized,
@@ -2286,7 +2178,6 @@ export function analyzeDataset(
             nonFailures: conformingAnswers,
             conformingAnswers,
             notApplicable,
-            undetermined,
             ics,
             sourceScore: sourceScoreSummary,
             bySection: failuresBySection,

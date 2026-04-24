@@ -39,7 +39,7 @@ export interface DatasetTypeInference {
 
 export type QAOutcome = "yes" | "no" | "pass" | "fail" | "na" | "unknown";
 export type SemanticQuestionPolarity = "positive" | "negative" | "neutral";
-export type SemanticResult = "real_failure" | "non_failure" | "na" | "undetermined";
+export type SemanticResult = "real_failure" | "non_failure" | "na";
 
 export interface QAItem {
   question: string;
@@ -190,7 +190,6 @@ export interface AnalysisResult {
     nonFailures: number;
     conformingAnswers: number;
     notApplicable: number;
-    undetermined: number;
     ics: number;
     sourceScore?: SourceScoreSummary;
     bySection: Array<{ section: string; total: number }>;
