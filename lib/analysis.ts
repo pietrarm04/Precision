@@ -186,11 +186,11 @@ function parseAsOutcome(rawValue: unknown): QAOutcome {
   if (naTokens.some((token) => normalized === token || normalized.includes(token))) {
     return "na";
   }
-  if (statusPassTokens.some((token) => normalized.includes(token))) {
-    return "pass";
-  }
   if (statusFailTokens.some((token) => normalized.includes(token))) {
     return "fail";
+  }
+  if (statusPassTokens.some((token) => normalized.includes(token))) {
+    return "pass";
   }
   if (yesTokens.includes(normalized)) {
     return "yes";
@@ -242,19 +242,7 @@ function deriveSectionAndQuestionFromInspectionColumn(header: string): { section
 }
 
 function mapWideInspectionSemanticResult(outcome: QAOutcome, responseRaw: string): "real_failure" | "non_failure" | "na" | "undetermined" {
-  if (isMissing(responseRaw)) {
-    return "na";
-  }
-  if (outcome === "na") {
-    return "na";
-  }
-  if (outcome === "pass" || outcome === "yes") {
-    return "non_failure";
-  }
-  if (outcome === "fail" || outcome === "no") {
-    return "real_failure";
-  }
-  return "undetermined";
+  return applySemanticRule(outcome, responseRaw);
 }
 
 function inferQuestionPolarity(question: string): SemanticQuestionPolarity {
@@ -303,37 +291,21 @@ function inferQuestionPolarity(question: string): SemanticQuestionPolarity {
   return "neutral";
 }
 
-function applySemanticRule(
-  questionPolarity: SemanticQuestionPolarity,
-  outcome: QAOutcome,
-  responseRaw: string,
-): "real_failure" | "non_failure" | "na" | "undetermined" {
+function applySemanticRule(outcome: QAOutcome, responseRaw: string): "real_failure" | "non_failure" | "na" | "undetermined" {
+  if (isMissing(responseRaw)) {
+    return "na";
+  }
   if (outcome === "na") {
     return "na";
   }
+  if (outcome === "pass" || outcome === "yes") {
+    return "non_failure";
+  }
+  if (outcome === "fail" || outcome === "no") {
+    return "real_failure";
+  }
   if (outcome === "unknown") {
     return "undetermined";
-  }
-  if (outcome === "fail") {
-    return "real_failure";
-  }
-  if (outcome === "pass") {
-    return "non_failure";
-  }
-  if (outcome === "yes") {
-    if (questionPolarity === "negative") {
-      return "real_failure";
-    }
-    return "non_failure";
-  }
-  if (outcome === "no") {
-    if (questionPolarity === "positive") {
-      return "real_failure";
-    }
-    return "non_failure";
-  }
-  if (responseRaw.toLowerCase().includes("não conforme") || responseRaw.toLowerCase().includes("nao conforme")) {
-    return "real_failure";
   }
   return "undetermined";
 }
@@ -347,23 +319,7 @@ function resolveQuestionType(
   if (byQuestion && byQuestion.behavior !== "ignore") {
     return byQuestion.behavior;
   }
-  const defaultMode = config?.binaryInterpretationMode ?? "auto";
-  if (defaultMode === "treat_no_as_failure") {
-    return "positive";
-  }
-  if (defaultMode === "treat_yes_as_failure_for_negative_questions") {
-    const inferred = inferQuestionPolarity(question);
-    if (inferred !== "neutral") {
-      return inferred;
-    }
-  }
-  if (defaultMode === "treat_yes_as_positive") {
-    return "positive";
-  }
-  if (outcome === "yes" || outcome === "no") {
-    return inferQuestionPolarity(question);
-  }
-  return inferQuestionPolarity(question);
+  return "neutral";
 }
 
 function questionIsIgnored(question: string, config: ManualReviewConfig | undefined): boolean {
@@ -453,7 +409,7 @@ function buildInspectionItems(
           normalizedOutcome: outcome,
           section,
           date: dateCol ? toStringValue(row[dateCol]) : undefined,
-          semanticPolarity: resolveQuestionType(question, outcome, config),
+          semanticPolarity: "neutral",
           semanticResult: semantics,
           critical: criticalOverride,
           weight,
@@ -481,8 +437,7 @@ function buildInspectionItems(
     }
 
     const outcome = parseAsOutcome(responseRaw);
-    const polarity = resolveQuestionType(question, outcome, config);
-    const semantics = applySemanticRule(polarity, outcome, responseRaw);
+    const semantics = applySemanticRule(outcome, responseRaw);
     const section = sectionCol ? toStringValue(row[sectionCol]).trim() : "";
     const criticalOverride = config?.questionOverrides.find((q) => q.questionText === question)?.critical ?? false;
     const weight = questionWeight(question, section || undefined, config);
@@ -493,7 +448,7 @@ function buildInspectionItems(
       normalizedOutcome: outcome,
       section: section || undefined,
       date: dateCol ? toStringValue(row[dateCol]) : undefined,
-      semanticPolarity: polarity,
+      semanticPolarity: "neutral",
       semanticResult: semantics,
       critical: criticalOverride,
       weight,
@@ -766,10 +721,17 @@ function createSummaryCards(
   if (qaItems.length > 0) {
     const failures = qaItems.filter((item) => item.semanticResult === "real_failure").length;
     const na = qaItems.filter((item) => item.semanticResult === "na").length;
+    const evaluatedAnswers = failures + qaItems.filter((item) => item.semanticResult === "non_failure").length;
+    const calculatedIcs = clamp((1 - failures / Math.max(evaluatedAnswers, 1)) * 100, 0, 100);
     cards.push({
       label: "Falhas reais",
       value: `${failures} (${qaItems.length > 0 ? Math.round((failures / qaItems.length) * 100) : 0}%)`,
       emphasis: failures / Math.max(qaItems.length, 1) > 0.2 ? "danger" : "default",
+    });
+    cards.push({
+      label: "ICS calculado",
+      value: `${calculatedIcs.toFixed(1)}%`,
+      emphasis: calculatedIcs < 70 ? "warning" : "success",
     });
     cards.push({
       label: "Nao aplicavel",
@@ -1377,10 +1339,6 @@ function createDataPreview(dataset: NormalizedDataset, limit = 12): Record<strin
 }
 
 function findSourceScoreColumns(dataset: NormalizedDataset): { scoreColumn?: string; totalScoreColumn?: string } {
-  if (dataset.headers.some(isInspectionQuestionColumn)) {
-    return {};
-  }
-
   const byKeyword = (pattern: RegExp, excludes?: RegExp) =>
     dataset.headers.find((header) => {
       const normalized = header.toLowerCase();
@@ -1754,7 +1712,7 @@ function collectGroupStats(
         na: entry.na,
         undetermined: entry.undetermined,
         criticalFailures: entry.criticalFailures,
-        ics: sourceScore?.compliancePercentage ?? ics,
+        ics,
         failureRate,
       };
     })
@@ -2156,7 +2114,7 @@ export function analyzeDataset(
     20,
   ).map(([question, total]) => ({ question, total }));
 
-  const sourceScoreSummary = shouldInspect ? undefined : buildSourceScoreSummary(normalized);
+  const sourceScoreSummary = buildSourceScoreSummary(normalized);
   const summaryCards = createSummaryCards(
     normalized,
     inference,
@@ -2223,6 +2181,11 @@ export function analyzeDataset(
     if (sourceScoreSummary.isMaxScore) {
       summaryTextParts.push("Nenhuma nao conformidade identificada. Pontuacao maxima atingida.");
     }
+  }
+  if (qaItems.length > 0) {
+    summaryTextParts.push(
+      `ICS calculado pelo sistema: ${ics.toFixed(1)}% (Sim / (Sim + Não) = ${conformingAnswers}/${evaluatedAnswers}).`,
+    );
   }
   const mergedSummaryText = summaryTextParts.join(" ");
   const customDashboards = buildCustomDashboards({
