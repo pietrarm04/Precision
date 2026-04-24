@@ -420,6 +420,8 @@ export interface AnalyzeRequestPayload {
   fileName: string;
   fileBase64: string;
   files?: MultiAnalyzeFileInput[];
+  unitLabels?: string[];
+  unitIds?: string[];
   mode: "quick" | "reviewed";
   rules?: ManualReviewConfig;
   dashboardConfig?: DashboardCustomizationConfig;

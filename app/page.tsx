@@ -13,18 +13,6 @@ import {
   OkrInput,
 } from "@/lib/types";
 
-async function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const data = String(reader.result ?? "");
-      const split = data.split(",");
-      resolve(split[1] ?? "");
-    };
-    reader.onerror = () => reject(new Error("Falha ao ler arquivo."));
-    reader.readAsDataURL(file);
-  });
-}
 
 function createDefaultRules(result: AnalysisResult): ManualReviewConfig {
   return {
@@ -57,10 +45,6 @@ function appendClientDebugLog(payload: {
     body: JSON.stringify(payload),
   }).catch(() => {});
   // #endregion
-}
-
-function getClientTimestamp(): number {
-  return Date.now();
 }
 
 const KPI_OPTIONS: Array<{ key: KpiKey; label: string }> = [
@@ -101,6 +85,17 @@ type UploadedUnit = {
   file: File;
   unitLabel: string;
   includeInComparison: boolean;
+};
+
+type BatchAnalyzeResponse = {
+  results: Array<{
+    unit: string;
+    unitLabel?: string;
+    unitId?: string;
+    fileName: string;
+    analysis: AnalysisResult;
+  }>;
+  errors?: Array<{ fileName: string; unitLabel?: string; message: string }>;
 };
 
 function fileFingerprint(file: File): string {
@@ -170,7 +165,7 @@ export default function HomePage() {
         processableUnits: processableUnits.length,
         loading,
       },
-      timestamp: getClientTimestamp(),
+      timestamp: 0,
     });
     // #endregion
     if (!hasAnyProcessableFile) {
@@ -180,7 +175,7 @@ export default function HomePage() {
         location: "app/page.tsx:runAnalysis-no-file-branch",
         message: "runAnalysis exited without selected file",
         data: { mode, loading },
-        timestamp: getClientTimestamp(),
+        timestamp: 0,
       });
       // #endregion
       setError("Selecione ao menos um arquivo CSV, XLSX ou XLS para processar.");
@@ -192,33 +187,15 @@ export default function HomePage() {
     try {
       const total = processableUnits.length;
       setProcessingProgress({ current: 0, total });
-      const unitResults: Array<{
-        unitId: string;
-        fileName: string;
-        unitLabel: string;
-        analysis: AnalysisResult;
-      }> = [];
-      const unitErrors: Array<{ fileName: string; unitLabel?: string; message: string }> = [];
-
-      for (let index = 0; index < processableUnits.length; index += 1) {
-        const unit = processableUnits[index];
-        setProcessingProgress({ current: index + 1, total });
-        try {
-          const analysis = await runSingleAnalysis(unit, mode, reviewRules);
-          unitResults.push({
-            unitId: unit.id,
-            fileName: unit.file.name,
-            unitLabel: unit.unitLabel.trim(),
-            analysis,
-          });
-        } catch (unitError) {
-          unitErrors.push({
-            fileName: unit.file.name,
-            unitLabel: unit.unitLabel.trim() || undefined,
-            message: unitError instanceof Error ? unitError.message : "Falha ao processar arquivo.",
-          });
-        }
-      }
+      const batch = await runBatchAnalysis(processableUnits, mode, reviewRules);
+      setProcessingProgress({ current: total, total });
+      const unitResults = batch.results.map((item) => ({
+        unitId: item.unitId ?? `${item.fileName}-${item.unit}`,
+        fileName: item.fileName,
+        unitLabel: item.unitLabel ?? item.unit,
+        analysis: item.analysis,
+      }));
+      const unitErrors = batch.errors ?? [];
 
       if (unitResults.length === 0) {
         const firstError = unitErrors[0]?.message ?? "Nao foi possivel concluir a analise.";
@@ -283,7 +260,7 @@ export default function HomePage() {
         loading,
         derivedDisabled: !hasAnyProcessableFile || loading,
       },
-      timestamp: Date.now(),
+      timestamp: 0,
     });
     // #endregion
   }, [uploadedUnits, hasAnyProcessableFile, loading, dashboardConfig]);
@@ -318,34 +295,38 @@ export default function HomePage() {
     return buffer;
   }
 
-  async function runSingleAnalysis(
-    input: UploadedUnit,
+  async function runBatchAnalysis(
+    inputs: UploadedUnit[],
     mode: "quick" | "reviewed",
     reviewRules?: ManualReviewConfig,
-  ): Promise<AnalysisResult> {
-    const fileBase64 = await fileToBase64(input.file);
-    const payload = {
-      fileName: input.file.name,
-      fileBase64,
-      mode,
-      rules: reviewRules,
-      dashboardConfig,
-      grouping:
-        dashboardConfig.grouping === "setor" || dashboardConfig.grouping === "loja"
-          ? dashboardConfig.grouping
-          : "loja",
-      debugMode: false,
-    };
+  ): Promise<BatchAnalyzeResponse> {
+    const formData = new FormData();
+    formData.append("mode", mode);
+    formData.append("debugMode", "false");
+    formData.append(
+      "grouping",
+      dashboardConfig.grouping === "setor" || dashboardConfig.grouping === "loja"
+        ? dashboardConfig.grouping
+        : "loja",
+    );
+    formData.append("dashboardConfig", JSON.stringify(dashboardConfig));
+    if (reviewRules) {
+      formData.append("rules", JSON.stringify(reviewRules));
+    }
+    inputs.forEach((input) => {
+      formData.append("files", input.file);
+      formData.append("unitLabels", input.unitLabel.trim());
+      formData.append("unitIds", input.id);
+    });
     const response = await fetch("/api/analyze", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: formData,
     });
-    const data = (await response.json()) as AnalysisResult & { error?: string; message?: string };
-    if (!response.ok) {
-      throw new Error(data.error ?? data.message ?? `Erro ao processar ${input.file.name}.`);
+    const data = (await response.json()) as BatchAnalyzeResponse & { message?: string; error?: string };
+    if (!response.ok || !data.results) {
+      throw new Error(data.error ?? data.message ?? "Erro ao processar arquivos.");
     }
-    return data;
+    return { results: data.results, errors: data.errors };
   }
 
   async function loadSampleFile() {
@@ -439,6 +420,7 @@ export default function HomePage() {
           onChange={(event) => {
             const fileList = event.currentTarget.files;
             const files = fileList ? Array.from(fileList) : [];
+            const timestamp = performance.now();
             // #region agent log
             appendClientDebugLog({
               hypothesisId: "B",
@@ -448,7 +430,7 @@ export default function HomePage() {
                 fileCount: files.length,
                 totalSize: files.reduce((acc, file) => acc + file.size, 0),
               },
-              timestamp: Date.now(),
+              timestamp,
             });
             // #endregion
             if (files.length === 0) {
@@ -1115,6 +1097,7 @@ export default function HomePage() {
             onClick={() => {
               const mode = quickMode ? "quick" : "reviewed";
               const derivedDisabled = !hasAnyProcessableFile || loading;
+              const timestamp = performance.now();
               // #region agent log
               appendClientDebugLog({
                 hypothesisId: "D",
@@ -1127,7 +1110,7 @@ export default function HomePage() {
                   loading,
                   derivedDisabled,
                 },
-                timestamp: Date.now(),
+                timestamp,
               });
               // #endregion
               if (derivedDisabled) {
