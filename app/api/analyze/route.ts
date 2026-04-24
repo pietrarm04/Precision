@@ -110,25 +110,116 @@ function toArrayBuffer(buffer: Buffer): ArrayBuffer {
 function isSupportedExtension(fileName: string): boolean {
   return /\.(csv|xlsx|xls)$/i.test(fileName);
 }
+
+function boolFromUnknown(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return undefined;
+}
+
+async function analyzeSingleFile(args: {
+  fileName: string;
+  fileBytes: ArrayBuffer;
+  mode: "quick" | "reviewed";
+  rules?: z.infer<typeof reviewSchema>;
+  dashboardConfig?: DashboardCustomizationConfig;
+  debugMode?: boolean;
+}) {
+  const result = runAnalysisPipeline(args.fileName, args.fileBytes, {
+    mode: args.mode,
+    rules: args.rules,
+    dashboardConfig: args.dashboardConfig,
+    debugMode: args.debugMode,
+  });
+  return result;
+}
+
 export async function POST(request: Request) {
   try {
-    const raw = await request.json();
-    const payload = requestSchema.parse(raw);
-    if (!isSupportedExtension(payload.fileName)) {
-      return NextResponse.json(
-        {
-          message: "Formato nao suportado. Envie CSV, XLSX ou XLS.",
-          supportedFormats: ["csv", "xlsx", "xls"],
+    const contentType = request.headers.get("content-type") ?? "";
+    if (!contentType.toLowerCase().includes("multipart/form-data")) {
+      const raw = await request.json();
+      const payload = requestSchema.parse(raw);
+      if (!isSupportedExtension(payload.fileName)) {
+        return NextResponse.json(
+          {
+            message: "Formato nao suportado. Envie CSV, XLSX ou XLS.",
+            supportedFormats: ["csv", "xlsx", "xls"],
+          },
+          { status: 400 },
+        );
+      }
+
+      const fileBuffer = Buffer.from(payload.fileBase64, "base64");
+      if (fileBuffer.byteLength === 0) {
+        return NextResponse.json(
+          {
+            message: "Arquivo recebido vazio apos decodificacao base64.",
+            supportedFormats: ["csv", "xlsx", "xls"],
+          },
+          { status: 400 },
+        );
+      }
+
+      // #region agent log
+      appendDebugLog({
+        hypothesisId: "E",
+        location: "app/api/analyze/route.ts:POST-entry-json",
+        message: "Analyze API received JSON payload",
+        data: {
+          mode: payload.mode,
+          fileName: payload.fileName,
+          hasRules: Boolean(payload.rules),
+          hasDashboardConfig: Boolean(payload.dashboardConfig),
+          okrCount: payload.dashboardConfig?.okrs.length ?? 0,
+          base64Length: payload.fileBase64.length,
         },
-        { status: 400 },
-      );
+        timestamp: Date.now(),
+      });
+      // #endregion
+      const dashboardConfig = payload.dashboardConfig as DashboardCustomizationConfig | undefined;
+      const result = await analyzeSingleFile({
+        fileName: payload.fileName,
+        fileBytes: toArrayBuffer(fileBuffer),
+        mode: payload.mode,
+        rules: payload.rules,
+        dashboardConfig,
+        debugMode: payload.debugMode,
+      });
+      return NextResponse.json(result);
     }
 
-    const fileBuffer = Buffer.from(payload.fileBase64, "base64");
-    if (fileBuffer.byteLength === 0) {
+    const formData = await request.formData();
+    const mode = z.enum(["quick", "reviewed"]).parse(String(formData.get("mode") ?? "quick"));
+    const rulesRaw = formData.get("rules");
+    const dashboardConfigRaw = formData.get("dashboardConfig");
+    const debugModeRaw = formData.get("debugMode");
+    const rules =
+      typeof rulesRaw === "string" && rulesRaw.trim().length > 0
+        ? reviewSchema.parse(JSON.parse(rulesRaw))
+        : undefined;
+    const dashboardConfig =
+      typeof dashboardConfigRaw === "string" && dashboardConfigRaw.trim().length > 0
+        ? (dashboardConfigSchema.parse(JSON.parse(dashboardConfigRaw)) as DashboardCustomizationConfig)
+        : undefined;
+    const debugMode = boolFromUnknown(debugModeRaw);
+
+    const allFiles = formData.getAll("files").filter((entry): entry is File => entry instanceof File);
+    const maybeSingle = formData.get("file");
+    if (allFiles.length === 0 && maybeSingle instanceof File) {
+      allFiles.push(maybeSingle);
+    }
+
+    if (allFiles.length === 0) {
       return NextResponse.json(
         {
-          message: "Arquivo recebido vazio apos decodificacao base64.",
+          message: "Nenhum arquivo enviado. Envie um ou mais arquivos via campo 'files'.",
           supportedFormats: ["csv", "xlsx", "xls"],
         },
         { status: 400 },
@@ -138,27 +229,84 @@ export async function POST(request: Request) {
     // #region agent log
     appendDebugLog({
       hypothesisId: "E",
-      location: "app/api/analyze/route.ts:POST-entry",
-      message: "Analyze API received payload",
+      location: "app/api/analyze/route.ts:POST-entry-multipart",
+      message: "Analyze API received multipart payload",
       data: {
-        mode: payload.mode,
-        fileName: payload.fileName,
-        hasRules: Boolean(payload.rules),
-        hasDashboardConfig: Boolean(payload.dashboardConfig),
-        okrCount: payload.dashboardConfig?.okrs.length ?? 0,
-        base64Length: payload.fileBase64.length,
+        mode,
+        fileCount: allFiles.length,
+        fileNames: allFiles.map((file) => file.name),
+        hasRules: Boolean(rules),
+        hasDashboardConfig: Boolean(dashboardConfig),
+        okrCount: dashboardConfig?.okrs?.length ?? 0,
       },
       timestamp: Date.now(),
     });
     // #endregion
-    const dashboardConfig = payload.dashboardConfig as DashboardCustomizationConfig | undefined;
-    const result = runAnalysisPipeline(payload.fileName, toArrayBuffer(fileBuffer), {
-      mode: payload.mode,
-      rules: payload.rules,
-      dashboardConfig,
-      debugMode: payload.debugMode,
+
+    const results: Array<{ fileName: string; result?: Awaited<ReturnType<typeof analyzeSingleFile>>; error?: string }> =
+      [];
+    for (const file of allFiles) {
+      if (!isSupportedExtension(file.name)) {
+        results.push({
+          fileName: file.name,
+          error: "Formato nao suportado. Envie CSV, XLSX ou XLS.",
+        });
+        continue;
+      }
+      const fileBytes = await file.arrayBuffer();
+      if (fileBytes.byteLength === 0) {
+        results.push({
+          fileName: file.name,
+          error: "Arquivo vazio apos upload.",
+        });
+        continue;
+      }
+      try {
+        const analyzed = await analyzeSingleFile({
+          fileName: file.name,
+          fileBytes,
+          mode,
+          rules,
+          dashboardConfig,
+          debugMode,
+        });
+        results.push({
+          fileName: file.name,
+          result: analyzed,
+        });
+      } catch (fileError) {
+        results.push({
+          fileName: file.name,
+          error:
+            fileError instanceof Error
+              ? fileError.message
+              : "Nao foi possivel processar o arquivo. Verifique formato e tente novamente.",
+        });
+      }
+    }
+
+    if (allFiles.length === 1) {
+      const single = results[0];
+      if (single?.result) {
+        return NextResponse.json(single.result);
+      }
+      return NextResponse.json(
+        { message: single?.error ?? "Nao foi possivel processar o arquivo." },
+        { status: 400 },
+      );
+    }
+
+    const successCount = results.filter((entry) => entry.result).length;
+    const failureCount = results.filter((entry) => entry.error).length;
+    return NextResponse.json({
+      mode,
+      results,
+      summary: {
+        total: results.length,
+        successCount,
+        failureCount,
+      },
     });
-    return NextResponse.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json(

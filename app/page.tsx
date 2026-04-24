@@ -11,23 +11,6 @@ import {
   ManualReviewConfig,
   OkrInput,
 } from "@/lib/types";
-
-async function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const data = String(reader.result ?? "");
-      const split = data.split(",");
-      resolve(split[1] ?? "");
-    };
-    reader.onerror = () => reject(new Error("Falha ao ler arquivo."));
-    reader.readAsDataURL(file);
-  });
-}
-
-function assertValidFile(file: File | null): file is File {
-  return isValidTabularFile(file);
-}
 function createDefaultRules(result: AnalysisResult): ManualReviewConfig {
   return {
     mode: "reviewed",
@@ -90,12 +73,13 @@ function createDefaultDashboardConfig(): DashboardCustomizationConfig {
 }
 
 export default function HomePage() {
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [quickMode, setQuickMode] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [debugJson, setDebugJson] = useState<string | null>(null);
+  const [submitDebugMessage, setSubmitDebugMessage] = useState<string | null>(null);
   const [rules, setRules] = useState<ManualReviewConfig | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryText, setSummaryText] = useState<string | null>(null);
@@ -106,14 +90,15 @@ export default function HomePage() {
     createDefaultDashboardConfig(),
   );
 
-  const fileInfo = useMemo(() => {
-    if (!selectedFile) {
+  const selectedFileNames = useMemo(() => {
+    if (selectedFiles.length === 0) {
       return null;
     }
-    return `${selectedFile.name} · ${(selectedFile.size / 1024).toFixed(1)} KB`;
-  }, [selectedFile]);
+    return selectedFiles.map((file) => `${file.name} · ${(file.size / 1024).toFixed(1)} KB`);
+  }, [selectedFiles]);
 
   async function runAnalysis(mode: "quick" | "reviewed", reviewRules?: ManualReviewConfig) {
+    const invalidFiles = selectedFiles.filter((file) => !isValidTabularFile(file));
     // #region agent log
     appendClientDebugLog({
       hypothesisId: "C",
@@ -121,65 +106,94 @@ export default function HomePage() {
       message: "runAnalysis invoked",
       data: {
         mode,
-        hasSelectedFile: Boolean(selectedFile),
+        selectedFileCount: selectedFiles.length,
+        invalidFileCount: invalidFiles.length,
         loading,
       },
       timestamp: Date.now(),
     });
     // #endregion
-    if (!assertValidFile(selectedFile)) {
+    if (selectedFiles.length === 0) {
       // #region agent log
       appendClientDebugLog({
         hypothesisId: "C",
         location: "app/page.tsx:runAnalysis-no-file-branch",
         message: "runAnalysis exited without selected file",
-        data: { mode, loading },
+        data: { mode, loading, selectedFileCount: selectedFiles.length },
         timestamp: Date.now(),
       });
       // #endregion
-      setError("Selecione um arquivo CSV, XLSX ou XLS antes de iniciar a analise.");
+      setError("Selecione pelo menos um arquivo CSV, XLSX ou XLS antes de iniciar a analise.");
+      return;
+    }
+    if (invalidFiles.length > 0) {
+      setError(
+        `Arquivo(s) invalido(s): ${invalidFiles.map((file) => file.name).join(", ")}. Envie apenas CSV, XLSX ou XLS.`,
+      );
       return;
     }
     setLoading(true);
     setError(null);
     setDebugJson(null);
     try {
-      const fileBase64 = await fileToBase64(selectedFile);
+      const formData = new FormData();
+      selectedFiles.forEach((file) => formData.append("files", file));
+      formData.append("mode", mode);
+      if (reviewRules) {
+        formData.append("rules", JSON.stringify(reviewRules));
+      }
+      formData.append("dashboardConfig", JSON.stringify(dashboardConfig));
       // #region agent log
       appendClientDebugLog({
         hypothesisId: "C",
         location: "app/page.tsx:runAnalysis-before-fetch",
-        message: "Prepared payload for /api/analyze",
+        message: "Prepared multipart payload for /api/analyze",
         data: {
           mode,
-          fileSize: selectedFile.size,
-          fileType: selectedFile.type || "unknown",
-          base64Length: fileBase64.length,
+          fileCount: selectedFiles.length,
+          fileNames: selectedFiles.map((file) => file.name),
         },
         timestamp: Date.now(),
       });
       // #endregion
-      const payload = {
-        fileName: selectedFile.name,
-        fileBase64,
-        mode,
-        rules: reviewRules,
-        dashboardConfig,
-        debug: false,
-      };
       const response = await fetch("/api/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: formData,
       });
-      const data = (await response.json()) as AnalysisResult & { error?: string; message?: string };
+      const data = (await response.json()) as
+        | (AnalysisResult & { error?: string; message?: string })
+        | {
+            results: Array<{ fileName: string; result?: AnalysisResult; error?: string }>;
+            message?: string;
+          };
       if (!response.ok) {
-        throw new Error(data.error ?? data.message ?? "Erro ao processar arquivo.");
+        throw new Error(
+          "error" in data
+            ? data.error ?? data.message ?? "Erro ao processar arquivo."
+            : data.message ?? "Erro ao processar arquivo.",
+        );
       }
-      setResult(data);
-      setDebugJson(JSON.stringify(data, null, 2));
-      if (mode === "reviewed") {
-        setRules(reviewRules ?? createDefaultRules(data));
+      if ("results" in data && Array.isArray(data.results)) {
+        const firstSuccess = data.results.find((entry) => entry.result)?.result;
+        if (!firstSuccess) {
+          const batchErrors = data.results
+            .filter((entry) => entry.error)
+            .map((entry) => `${entry.fileName}: ${entry.error}`)
+            .join(" | ");
+          throw new Error(batchErrors || "Nenhum arquivo foi processado com sucesso.");
+        }
+        setResult(firstSuccess);
+        setDebugJson(JSON.stringify(data, null, 2));
+        if (mode === "reviewed") {
+          setRules(reviewRules ?? createDefaultRules(firstSuccess));
+        }
+      } else {
+        const singleResult = data as AnalysisResult & { error?: string; message?: string };
+        setResult(singleResult);
+        setDebugJson(JSON.stringify(singleResult, null, 2));
+        if (mode === "reviewed") {
+          setRules(reviewRules ?? createDefaultRules(singleResult));
+        }
       }
     } catch (analysisError) {
       setResult(null);
@@ -201,15 +215,15 @@ export default function HomePage() {
       location: "app/page.tsx:state-effect",
       message: "State snapshot updated",
       data: {
-        hasSelectedFile: Boolean(selectedFile),
-        selectedFileSize: selectedFile?.size ?? null,
+        selectedFileCount: selectedFiles.length,
+        selectedFileNames: selectedFiles.map((file) => file.name),
         loading,
-        derivedDisabled: !selectedFile || loading,
+        derivedDisabled: selectedFiles.length === 0,
       },
       timestamp: Date.now(),
     });
     // #endregion
-  }, [selectedFile, loading, dashboardConfig]);
+  }, [selectedFiles, loading, dashboardConfig]);
 
   useEffect(() => {
     async function loadSampleFiles() {
@@ -261,10 +275,11 @@ export default function HomePage() {
       const file = new File([decodeBase64(data.fileBase64)], data.fileName, {
         type: data.mimeType ?? "application/octet-stream",
       });
-      setSelectedFile(file);
+      setSelectedFiles([file]);
       setResult(null);
       setRules(null);
       setSummaryText(null);
+      setSubmitDebugMessage(null);
     } catch (sampleError) {
       setError(sampleError instanceof Error ? sampleError.message : "Falha ao carregar exemplo.");
     } finally {
@@ -317,40 +332,42 @@ export default function HomePage() {
         </p>
         <input
           type="file"
+          multiple={true}
           accept=".csv,.xlsx,.xls"
           onChange={(event) => {
-            const files = event.currentTarget.files;
-            const file = files?.[0] ?? null;
+            const files = Array.from(event.currentTarget.files ?? []);
             // #region agent log
             appendClientDebugLog({
               hypothesisId: "B",
               location: "app/page.tsx:file-input-onChange",
               message: "File input changed",
               data: {
-                fileCount: files?.length ?? 0,
-                selectedFileSize: file?.size ?? null,
-                selectedFileType: file?.type ?? "none",
+                fileCount: files.length,
+                selectedFileNames: files.map((file) => file.name),
               },
               timestamp: Date.now(),
             });
             // #endregion
-            if (!file) {
+            setSelectedFiles(files);
+            setResult(null);
+            setDebugJson(null);
+            setRules(null);
+            setSummaryText(null);
+            setSubmitDebugMessage(null);
+            setDashboardConfig(createDefaultDashboardConfig());
+            if (files.length === 0) {
               setError(
                 "Nenhum arquivo foi selecionado. Se estiver em ambiente remoto, escolha um arquivo local do computador ou use o carregamento de exemplo.",
               );
               return;
             }
-            if (file && !isValidTabularFile(file)) {
-              setSelectedFile(null);
-              setError("Arquivo invalido. Envie apenas CSV, XLSX ou XLS.");
+            const invalidFiles = files.filter((file) => !isValidTabularFile(file));
+            if (invalidFiles.length > 0) {
+              setError(
+                `Arquivo(s) invalido(s): ${invalidFiles.map((file) => file.name).join(", ")}. Envie apenas CSV, XLSX ou XLS.`,
+              );
               return;
             }
-            setSelectedFile(file);
-            setResult(null);
-            setDebugJson(null);
-            setRules(null);
-            setSummaryText(null);
-            setDashboardConfig(createDefaultDashboardConfig());
             setError(null);
           }}
         />
@@ -386,7 +403,16 @@ export default function HomePage() {
             </div>
           </div>
         )}
-        {fileInfo && <div style={{ color: "var(--muted)" }}>{fileInfo}</div>}
+        {selectedFileNames && (
+          <div className="card" style={{ padding: 10 }}>
+            <strong>{selectedFiles.length} arquivos selecionados</strong>
+            <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+              {selectedFileNames.map((fileLabel) => (
+                <li key={fileLabel}>{fileLabel}</li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <label className="card" style={{ padding: 12 }}>
             <input
@@ -686,7 +712,10 @@ export default function HomePage() {
             className="btn"
             onClick={() => {
               const mode = quickMode ? "quick" : "reviewed";
-              const derivedDisabled = !isValidTabularFile(selectedFile) || loading;
+              const derivedDisabled = selectedFiles.length === 0;
+              const clickMessage = `Clique em Processar às ${new Date().toLocaleTimeString("pt-BR")} com ${selectedFiles.length} arquivo(s).`;
+              console.log(clickMessage);
+              setSubmitDebugMessage(clickMessage);
               // #region agent log
               appendClientDebugLog({
                 hypothesisId: "D",
@@ -694,7 +723,7 @@ export default function HomePage() {
                 message: "Process button click received",
                 data: {
                   mode,
-                  hasSelectedFile: Boolean(selectedFile),
+                  selectedFileCount: selectedFiles.length,
                   loading,
                   derivedDisabled,
                 },
@@ -706,12 +735,17 @@ export default function HomePage() {
               }
               void runAnalysis(mode, quickMode ? undefined : rules ?? undefined);
             }}
-            disabled={!isValidTabularFile(selectedFile) || loading}
+            disabled={selectedFiles.length === 0}
           >
-            {loading ? "Processando..." : "Processar arquivo"}
+            {loading ? "Processando arquivos..." : "Processar arquivo(s)"}
           </button>
         </div>
-        {loading && <div className="pill">Processando arquivo e aguardando resposta da API...</div>}
+        {submitDebugMessage && (
+          <div className="pill" style={{ width: "fit-content" }}>
+            {submitDebugMessage}
+          </div>
+        )}
+        {loading && <div className="pill">Processando arquivos...</div>}
         {error && (
           <div className="pill danger" style={{ width: "fit-content" }}>
             {error}
