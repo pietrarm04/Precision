@@ -1,0 +1,7 @@
+meta,export,from,system
+,,,
+Name,Value,Date
+Alice,10,2026-03-01
+Bob,"20
+Carol,abc,not-a-date,extra-col
+,,,

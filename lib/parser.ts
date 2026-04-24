@@ -6,12 +6,35 @@ import { normalizeHeader, toStringValue } from "@/lib/utils";
 const MAX_ROWS = 50_000;
 const HEADER_SCAN_LIMIT = 18;
 
-function matrixFromCsv(buffer: Buffer): string[][] {
+function matrixFromCsv(buffer: Buffer): { matrix: string[][]; warnings: string[]; errors: string[] } {
   const csv = buffer.toString("utf-8");
-  const parsed = Papa.parse<string[]>(csv, {
+  const parsed: Papa.ParseResult<string[]> = Papa.parse<string[]>(csv, {
     skipEmptyLines: false,
+    delimiter: "",
+    dynamicTyping: false,
   });
-  return parsed.data.map((row: string[]) => row.map((cell: string) => toStringValue(cell)));
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  for (const parseError of parsed.errors) {
+    const rowLabel =
+      parseError.row !== undefined && parseError.row !== null ? `linha ${parseError.row + 1}` : "linha desconhecida";
+    const message = `CSV ${rowLabel}: ${parseError.message}`;
+    if (parseError.code === "UndetectableDelimiter") {
+      warnings.push(message);
+      continue;
+    }
+    warnings.push(message);
+  }
+
+  const matrix = parsed.data.map((row: string[]) => row.map((cell: string) => toStringValue(cell)));
+  if (matrix.length > 0 && matrix[0].length > 0) {
+    matrix[0][0] = matrix[0][0].replace(/^\uFEFF/, "");
+  }
+  if (matrix.length === 0) {
+    errors.push("CSV sem linhas legiveis apos parsing.");
+  }
+
+  return { matrix, warnings, errors };
 }
 
 function matrixFromExcel(buffer: Buffer): string[][] {
@@ -97,14 +120,45 @@ export function parseTabularFile(fileName: string, bytes: ArrayBuffer): ParsedTa
   }
 
   const buffer = Buffer.from(bytes);
-  const matrix = extension === "csv" ? matrixFromCsv(buffer) : matrixFromExcel(buffer);
-  if (matrix.length === 0) {
-    throw new Error("Arquivo vazio ou sem linhas legiveis.");
+  const warnings: string[] = [];
+  const errors: string[] = [];
+
+  let matrix: string[][] = [];
+  try {
+    if (extension === "csv") {
+      const csvParsed = matrixFromCsv(buffer);
+      matrix = csvParsed.matrix;
+      warnings.push(...csvParsed.warnings);
+      errors.push(...csvParsed.errors);
+    } else {
+      matrix = matrixFromExcel(buffer);
+    }
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : "Falha ao ler o arquivo tabular.");
   }
+
+  if (matrix.length === 0) {
+    return {
+      fileName,
+      extension,
+      headers: [],
+      rows: [],
+      warnings,
+      errors: errors.length > 0 ? errors : ["Arquivo vazio ou sem linhas legiveis."],
+    };
+  }
+
   const headerIndex = detectHeaderIndex(matrix);
-  const { headers, rows, warnings } = prepareRows(matrix, headerIndex);
-  if (rows.length === 0 || headers.length === 0) {
-    throw new Error("Nao foi possivel extrair dados tabulares validos.");
+  const prepared = prepareRows(matrix, headerIndex);
+  warnings.push(...prepared.warnings);
+
+  const headers = prepared.headers;
+  const rows = prepared.rows;
+  if (headers.length === 0) {
+    errors.push("Nao foi possivel identificar cabecalhos confiaveis.");
+  }
+  if (rows.length === 0) {
+    warnings.push("Arquivo lido, mas sem linhas de dados aproveitaveis apos limpeza.");
   }
 
   return {
@@ -113,5 +167,6 @@ export function parseTabularFile(fileName: string, bytes: ArrayBuffer): ParsedTa
     headers,
     rows,
     warnings,
+    errors,
   };
 }

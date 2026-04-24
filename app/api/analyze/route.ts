@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { runAnalysisPipeline } from "@/lib/pipeline";
 import { appendDebugLog } from "@/lib/debugLog";
+import { DashboardCustomizationConfig, KpiKey } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -34,17 +35,106 @@ const reviewSchema = z.object({
   notes: z.string().optional(),
 });
 
+const kpiKeySchema = z.enum([
+  "ics_medio",
+  "ics_minimo",
+  "ics_maximo",
+  "desvio_padrao_ics",
+  "total_nao_conformidades",
+  "nao_conformidades_criticas",
+  "percentual_nao_conformidade",
+  "percentual_nao_aplicavel",
+  "score_medio",
+  "quantidade_inspecoes",
+] as [KpiKey, ...KpiKey[]]);
+
+const dashboardConfigSchema = z.object({
+  selectedKpis: z.array(kpiKeySchema).default([]),
+  grouping: z.enum(["loja", "setor", "template", "periodo"]).default("loja"),
+  kpiTargets: z
+    .object({
+      ics_medio: z.number().optional(),
+      ics_minimo: z.number().optional(),
+      ics_maximo: z.number().optional(),
+      desvio_padrao_ics: z.number().optional(),
+      total_nao_conformidades: z.number().optional(),
+      nao_conformidades_criticas: z.number().optional(),
+      percentual_nao_conformidade: z.number().optional(),
+      percentual_nao_aplicavel: z.number().optional(),
+      score_medio: z.number().optional(),
+      quantidade_inspecoes: z.number().optional(),
+    })
+    .optional(),
+  visibleSections: z
+    .object({
+      kpiOverview: z.boolean().default(true),
+      sanitaryPerformance: z.boolean().default(true),
+      okr: z.boolean().default(true),
+      risk: z.boolean().default(true),
+    })
+    .optional(),
+  okrs: z
+    .array(
+      z.object({
+        objectiveTitle: z.string().min(1),
+        keyResults: z
+          .array(
+            z.object({
+              title: z.string().min(1),
+              currentValue: z.number(),
+              targetValue: z.number(),
+            }),
+          )
+          .default([]),
+      }),
+    )
+    .default([]),
+});
+
 const requestSchema = z.object({
   fileName: z.string().min(3),
   fileBase64: z.string().min(8),
   mode: z.enum(["quick", "reviewed"]).default("quick"),
   rules: reviewSchema.optional(),
+  dashboardConfig: dashboardConfigSchema.optional(),
+  debugMode: z.boolean().optional(),
 });
 
+function toArrayBuffer(buffer: Buffer): ArrayBuffer {
+  return buffer.buffer.slice(
+    buffer.byteOffset,
+    buffer.byteOffset + buffer.byteLength,
+  ) as ArrayBuffer;
+}
+
+function isSupportedExtension(fileName: string): boolean {
+  return /\.(csv|xlsx|xls)$/i.test(fileName);
+}
 export async function POST(request: Request) {
   try {
     const raw = await request.json();
     const payload = requestSchema.parse(raw);
+    if (!isSupportedExtension(payload.fileName)) {
+      return NextResponse.json(
+        {
+          message: "Formato nao suportado. Envie CSV, XLSX ou XLS.",
+          supportedFormats: ["csv", "xlsx", "xls"],
+        },
+        { status: 400 },
+      );
+    }
+
+    const fileBuffer = Buffer.from(payload.fileBase64, "base64");
+    if (fileBuffer.byteLength === 0) {
+      return NextResponse.json(
+        {
+          message: "Arquivo recebido vazio apos decodificacao base64.",
+          supportedFormats: ["csv", "xlsx", "xls"],
+        },
+        { status: 400 },
+      );
+    }
+
     // #region agent log
     appendDebugLog({
       hypothesisId: "E",
@@ -54,23 +144,20 @@ export async function POST(request: Request) {
         mode: payload.mode,
         fileName: payload.fileName,
         hasRules: Boolean(payload.rules),
+        hasDashboardConfig: Boolean(payload.dashboardConfig),
+        okrCount: payload.dashboardConfig?.okrs.length ?? 0,
         base64Length: payload.fileBase64.length,
       },
       timestamp: Date.now(),
     });
     // #endregion
-    const fileBuffer = Buffer.from(payload.fileBase64, "base64");
-    const result = runAnalysisPipeline(
-      payload.fileName,
-      fileBuffer.buffer.slice(
-        fileBuffer.byteOffset,
-        fileBuffer.byteOffset + fileBuffer.byteLength,
-      ) as ArrayBuffer,
-      {
-        mode: payload.mode,
-        rules: payload.rules,
-      },
-    );
+    const dashboardConfig = payload.dashboardConfig as DashboardCustomizationConfig | undefined;
+    const result = runAnalysisPipeline(payload.fileName, toArrayBuffer(fileBuffer), {
+      mode: payload.mode,
+      rules: payload.rules,
+      dashboardConfig,
+      debugMode: payload.debugMode,
+    });
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {

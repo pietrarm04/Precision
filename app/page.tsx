@@ -3,7 +3,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { RuleReviewPanel } from "@/components/RuleReviewPanel";
 import { ResultsView } from "@/components/ResultsView";
-import { AnalysisResult, ManualQuestionOverride, ManualReviewConfig } from "@/lib/types";
+import {
+  AnalysisResult,
+  DashboardCustomizationConfig,
+  KpiKey,
+  ManualQuestionOverride,
+  ManualReviewConfig,
+  OkrInput,
+} from "@/lib/types";
 
 async function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -18,6 +25,9 @@ async function fileToBase64(file: File): Promise<string> {
   });
 }
 
+function assertValidFile(file: File | null): file is File {
+  return isValidTabularFile(file);
+}
 function createDefaultRules(result: AnalysisResult): ManualReviewConfig {
   return {
     mode: "reviewed",
@@ -26,6 +36,13 @@ function createDefaultRules(result: AnalysisResult): ManualReviewConfig {
     sectionWeights: [],
     notes: "",
   };
+}
+
+function isValidTabularFile(file: File | null): boolean {
+  if (!file) {
+    return false;
+  }
+  return /\.(csv|xlsx|xls)$/i.test(file.name);
 }
 
 function appendClientDebugLog(payload: {
@@ -44,18 +61,50 @@ function appendClientDebugLog(payload: {
   // #endregion
 }
 
+const KPI_OPTIONS: Array<{ key: KpiKey; label: string }> = [
+  { key: "ics_medio", label: "ICS médio" },
+  { key: "ics_minimo", label: "ICS mínimo" },
+  { key: "ics_maximo", label: "ICS máximo" },
+  { key: "desvio_padrao_ics", label: "Desvio padrão do ICS" },
+  { key: "total_nao_conformidades", label: "Total de não conformidades" },
+  { key: "nao_conformidades_criticas", label: "Não conformidades críticas" },
+  { key: "percentual_nao_conformidade", label: "% de não conformidade" },
+  { key: "percentual_nao_aplicavel", label: "% de não aplicável" },
+  { key: "score_medio", label: "Score médio" },
+  { key: "quantidade_inspecoes", label: "Quantidade de inspeções" },
+];
+
+function createDefaultDashboardConfig(): DashboardCustomizationConfig {
+  return {
+    selectedKpis: KPI_OPTIONS.map((item) => item.key),
+    grouping: "loja",
+    kpiTargets: {},
+    visibleSections: {
+      kpiOverview: true,
+      sanitaryPerformance: true,
+      okr: true,
+      risk: true,
+    },
+    okrs: [],
+  };
+}
+
 export default function HomePage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [quickMode, setQuickMode] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [debugJson, setDebugJson] = useState<string | null>(null);
   const [rules, setRules] = useState<ManualReviewConfig | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryText, setSummaryText] = useState<string | null>(null);
   const [sampleFiles, setSampleFiles] = useState<string[]>([]);
   const [selectedSample, setSelectedSample] = useState<string>("");
   const [sampleLoading, setSampleLoading] = useState(false);
+  const [dashboardConfig, setDashboardConfig] = useState<DashboardCustomizationConfig>(
+    createDefaultDashboardConfig(),
+  );
 
   const fileInfo = useMemo(() => {
     if (!selectedFile) {
@@ -63,6 +112,87 @@ export default function HomePage() {
     }
     return `${selectedFile.name} · ${(selectedFile.size / 1024).toFixed(1)} KB`;
   }, [selectedFile]);
+
+  async function runAnalysis(mode: "quick" | "reviewed", reviewRules?: ManualReviewConfig) {
+    // #region agent log
+    appendClientDebugLog({
+      hypothesisId: "C",
+      location: "app/page.tsx:runAnalysis-entry",
+      message: "runAnalysis invoked",
+      data: {
+        mode,
+        hasSelectedFile: Boolean(selectedFile),
+        loading,
+      },
+      timestamp: Date.now(),
+    });
+    // #endregion
+    if (!assertValidFile(selectedFile)) {
+      // #region agent log
+      appendClientDebugLog({
+        hypothesisId: "C",
+        location: "app/page.tsx:runAnalysis-no-file-branch",
+        message: "runAnalysis exited without selected file",
+        data: { mode, loading },
+        timestamp: Date.now(),
+      });
+      // #endregion
+      setError("Selecione um arquivo CSV, XLSX ou XLS antes de iniciar a analise.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setDebugJson(null);
+    try {
+      const fileBase64 = await fileToBase64(selectedFile);
+      // #region agent log
+      appendClientDebugLog({
+        hypothesisId: "C",
+        location: "app/page.tsx:runAnalysis-before-fetch",
+        message: "Prepared payload for /api/analyze",
+        data: {
+          mode,
+          fileSize: selectedFile.size,
+          fileType: selectedFile.type || "unknown",
+          base64Length: fileBase64.length,
+        },
+        timestamp: Date.now(),
+      });
+      // #endregion
+      const payload = {
+        fileName: selectedFile.name,
+        fileBase64,
+        mode,
+        rules: reviewRules,
+        dashboardConfig,
+        debug: false,
+      };
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = (await response.json()) as AnalysisResult & { error?: string; message?: string };
+      if (!response.ok) {
+        throw new Error(data.error ?? data.message ?? "Erro ao processar arquivo.");
+      }
+      setResult(data);
+      setDebugJson(JSON.stringify(data, null, 2));
+      if (mode === "reviewed") {
+        setRules(reviewRules ?? createDefaultRules(data));
+      }
+    } catch (analysisError) {
+      setResult(null);
+      setDebugJson(null);
+      setError(
+        analysisError instanceof Error
+          ? analysisError.message
+          : "Nao foi possivel concluir a analise.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     // #region agent log
@@ -79,7 +209,7 @@ export default function HomePage() {
       timestamp: Date.now(),
     });
     // #endregion
-  }, [selectedFile, loading]);
+  }, [selectedFile, loading, dashboardConfig]);
 
   useEffect(() => {
     async function loadSampleFiles() {
@@ -139,81 +269,6 @@ export default function HomePage() {
       setError(sampleError instanceof Error ? sampleError.message : "Falha ao carregar exemplo.");
     } finally {
       setSampleLoading(false);
-    }
-  }
-
-  async function runAnalysis(mode: "quick" | "reviewed", reviewRules?: ManualReviewConfig) {
-    // #region agent log
-    appendClientDebugLog({
-      hypothesisId: "C",
-      location: "app/page.tsx:runAnalysis-entry",
-      message: "runAnalysis invoked",
-      data: {
-        mode,
-        hasSelectedFile: Boolean(selectedFile),
-        loading,
-      },
-      timestamp: Date.now(),
-    });
-    // #endregion
-    if (!selectedFile) {
-      // #region agent log
-      appendClientDebugLog({
-        hypothesisId: "C",
-        location: "app/page.tsx:runAnalysis-no-file-branch",
-        message: "runAnalysis exited without selected file",
-        data: { mode, loading },
-        timestamp: Date.now(),
-      });
-      // #endregion
-      setError("Selecione um arquivo antes de iniciar a analise.");
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const fileBase64 = await fileToBase64(selectedFile);
-      // #region agent log
-      appendClientDebugLog({
-        hypothesisId: "C",
-        location: "app/page.tsx:runAnalysis-before-fetch",
-        message: "Prepared payload for /api/analyze",
-        data: {
-          mode,
-          fileSize: selectedFile.size,
-          fileType: selectedFile.type || "unknown",
-          base64Length: fileBase64.length,
-        },
-        timestamp: Date.now(),
-      });
-      // #endregion
-      const payload = {
-        fileName: selectedFile.name,
-        fileBase64,
-        mode,
-        rules: reviewRules,
-      };
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = (await response.json()) as AnalysisResult & { error?: string; message?: string };
-      if (!response.ok) {
-        throw new Error(data.error ?? data.message ?? "Erro ao processar arquivo.");
-      }
-      setResult(data);
-      if (mode === "reviewed") {
-        setRules(reviewRules ?? createDefaultRules(data));
-      }
-    } catch (analysisError) {
-      setError(
-        analysisError instanceof Error
-          ? analysisError.message
-          : "Nao foi possivel concluir a analise.",
-      );
-    } finally {
-      setLoading(false);
     }
   }
 
@@ -285,10 +340,17 @@ export default function HomePage() {
               );
               return;
             }
+            if (file && !isValidTabularFile(file)) {
+              setSelectedFile(null);
+              setError("Arquivo invalido. Envie apenas CSV, XLSX ou XLS.");
+              return;
+            }
             setSelectedFile(file);
             setResult(null);
+            setDebugJson(null);
             setRules(null);
             setSummaryText(null);
+            setDashboardConfig(createDefaultDashboardConfig());
             setError(null);
           }}
         />
@@ -347,13 +409,284 @@ export default function HomePage() {
             Analise revisada (com ajuste de regras)
           </label>
         </div>
+        <div className="card" style={{ padding: 14, display: "grid", gap: 12 }}>
+          <h3 style={{ margin: 0 }}>2) Personalização de KPI e OKR</h3>
+          <p style={{ margin: 0, color: "var(--muted)" }}>
+            Escolha os KPIs, agrupamento, metas e seções visíveis para o dashboard executivo.
+          </p>
+          <label>
+            <span>Agrupar por</span>
+            <select
+              value={dashboardConfig.grouping}
+              onChange={(event) =>
+                setDashboardConfig((prev) => ({
+                  ...prev,
+                  grouping: event.target.value as DashboardCustomizationConfig["grouping"],
+                }))
+              }
+            >
+              <option value="loja">Loja</option>
+              <option value="setor">Setor</option>
+              <option value="template">Template</option>
+              <option value="periodo">Período</option>
+            </select>
+          </label>
+          <div style={{ display: "grid", gap: 8 }}>
+            <strong>KPIs exibidos</strong>
+            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 8 }}>
+              {KPI_OPTIONS.map((option) => {
+                const checked = dashboardConfig.selectedKpis.includes(option.key);
+                return (
+                  <label key={option.key} className="card" style={{ padding: 10 }}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(event) => {
+                        const enable = event.target.checked;
+                        setDashboardConfig((prev) => {
+                          const current = new Set(prev.selectedKpis);
+                          if (enable) current.add(option.key);
+                          else current.delete(option.key);
+                          return {
+                            ...prev,
+                            selectedKpis: KPI_OPTIONS.map((item) => item.key).filter((key) => current.has(key)),
+                          };
+                        });
+                      }}
+                      style={{ width: "auto", marginRight: 8 }}
+                    />
+                    {option.label}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+          <div style={{ display: "grid", gap: 8 }}>
+            <strong>Metas (targets) por KPI</strong>
+            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 8 }}>
+              {KPI_OPTIONS.map((option) => (
+                <label key={`target-${option.key}`}>
+                  <span>{option.label}</span>
+                  <input
+                    type="number"
+                    placeholder="Sem meta"
+                    value={dashboardConfig.kpiTargets?.[option.key] ?? ""}
+                    onChange={(event) => {
+                      const raw = event.target.value.trim();
+                      setDashboardConfig((prev) => {
+                        const nextTargets = { ...(prev.kpiTargets ?? {}) };
+                        if (!raw) {
+                          delete nextTargets[option.key];
+                        } else {
+                          const numeric = Number(raw);
+                          if (Number.isFinite(numeric)) {
+                            nextTargets[option.key] = numeric;
+                          }
+                        }
+                        return { ...prev, kpiTargets: nextTargets };
+                      });
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+          <div style={{ display: "grid", gap: 8 }}>
+            <strong>Seções visíveis</strong>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              {[
+                ["kpiOverview", "Visão KPI"],
+                ["sanitaryPerformance", "Performance sanitária"],
+                ["okr", "OKR"],
+                ["risk", "Risco"],
+              ].map(([key, label]) => (
+                <label key={key} className="card" style={{ padding: 10 }}>
+                  <input
+                    type="checkbox"
+                    checked={dashboardConfig.visibleSections?.[key as keyof NonNullable<DashboardCustomizationConfig["visibleSections"]>] ?? true}
+                    onChange={(event) =>
+                      setDashboardConfig((prev) => ({
+                        ...prev,
+                        visibleSections: {
+                          ...(prev.visibleSections ?? {
+                            kpiOverview: true,
+                            sanitaryPerformance: true,
+                            okr: true,
+                            risk: true,
+                          }),
+                          [key]: event.target.checked,
+                        },
+                      }))
+                    }
+                    style={{ width: "auto", marginRight: 8 }}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="card" style={{ padding: 12, display: "grid", gap: 8 }}>
+            <strong>OKR (objetivo + resultados-chave)</strong>
+            {(dashboardConfig.okrs ?? []).map((okr, okrIdx) => (
+              <div key={`okr-${okrIdx}`} className="card" style={{ padding: 10, display: "grid", gap: 8 }}>
+                <label>
+                  <span>Título do objetivo</span>
+                  <input
+                    type="text"
+                    value={okr.objectiveTitle}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setDashboardConfig((prev) => {
+                        const next = [...(prev.okrs ?? [])];
+                        next[okrIdx] = { ...next[okrIdx], objectiveTitle: value };
+                        return { ...prev, okrs: next };
+                      });
+                    }}
+                  />
+                </label>
+                {(okr.keyResults ?? []).map((kr, krIdx) => (
+                  <div
+                    key={`okr-${okrIdx}-kr-${krIdx}`}
+                    style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr auto", gap: 8, alignItems: "end" }}
+                  >
+                    <label>
+                      <span>Key Result</span>
+                      <input
+                        type="text"
+                        value={kr.title}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setDashboardConfig((prev) => {
+                            const next = [...(prev.okrs ?? [])];
+                            const nextKrs = [...next[okrIdx].keyResults];
+                            nextKrs[krIdx] = { ...nextKrs[krIdx], title: value };
+                            next[okrIdx] = { ...next[okrIdx], keyResults: nextKrs };
+                            return { ...prev, okrs: next };
+                          });
+                        }}
+                      />
+                    </label>
+                    <label>
+                      <span>Atual</span>
+                      <input
+                        type="number"
+                        value={kr.currentValue}
+                        onChange={(event) => {
+                          const value = Number(event.target.value);
+                          setDashboardConfig((prev) => {
+                            const next = [...(prev.okrs ?? [])];
+                            const nextKrs = [...next[okrIdx].keyResults];
+                            nextKrs[krIdx] = {
+                              ...nextKrs[krIdx],
+                              currentValue: Number.isFinite(value) ? value : 0,
+                            };
+                            next[okrIdx] = { ...next[okrIdx], keyResults: nextKrs };
+                            return { ...prev, okrs: next };
+                          });
+                        }}
+                      />
+                    </label>
+                    <label>
+                      <span>Meta</span>
+                      <input
+                        type="number"
+                        value={kr.targetValue}
+                        onChange={(event) => {
+                          const value = Number(event.target.value);
+                          setDashboardConfig((prev) => {
+                            const next = [...(prev.okrs ?? [])];
+                            const nextKrs = [...next[okrIdx].keyResults];
+                            nextKrs[krIdx] = {
+                              ...nextKrs[krIdx],
+                              targetValue: Number.isFinite(value) ? value : 1,
+                            };
+                            next[okrIdx] = { ...next[okrIdx], keyResults: nextKrs };
+                            return { ...prev, okrs: next };
+                          });
+                        }}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      onClick={() =>
+                        setDashboardConfig((prev) => {
+                          const next = [...(prev.okrs ?? [])];
+                          const nextKrs = [...next[okrIdx].keyResults];
+                          nextKrs.splice(krIdx, 1);
+                          next[okrIdx] = { ...next[okrIdx], keyResults: nextKrs };
+                          return { ...prev, okrs: next };
+                        })
+                      }
+                    >
+                      Remover KR
+                    </button>
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={() =>
+                      setDashboardConfig((prev) => {
+                        const next = [...(prev.okrs ?? [])];
+                        const okrItem: OkrInput = next[okrIdx] ?? { objectiveTitle: "", keyResults: [] };
+                        next[okrIdx] = {
+                          ...okrItem,
+                          keyResults: [
+                            ...(okrItem.keyResults ?? []),
+                            { title: "Novo KR", currentValue: 0, targetValue: 1 },
+                          ],
+                        };
+                        return { ...prev, okrs: next };
+                      })
+                    }
+                  >
+                    Adicionar KR
+                  </button>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={() =>
+                      setDashboardConfig((prev) => {
+                        const next = [...(prev.okrs ?? [])];
+                        next.splice(okrIdx, 1);
+                        return { ...prev, okrs: next };
+                      })
+                    }
+                  >
+                    Remover objetivo
+                  </button>
+                </div>
+              </div>
+            ))}
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() =>
+                setDashboardConfig((prev) => ({
+                  ...prev,
+                  okrs: [
+                    ...(prev.okrs ?? []),
+                    {
+                      objectiveTitle: "Novo objetivo",
+                      keyResults: [{ title: "Novo KR", currentValue: 0, targetValue: 1 }],
+                    },
+                  ],
+                }))
+              }
+            >
+              Adicionar objetivo OKR
+            </button>
+          </div>
+        </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button
             type="button"
             className="btn"
             onClick={() => {
               const mode = quickMode ? "quick" : "reviewed";
-              const derivedDisabled = !selectedFile || loading;
+              const derivedDisabled = !isValidTabularFile(selectedFile) || loading;
               // #region agent log
               appendClientDebugLog({
                 hypothesisId: "D",
@@ -373,11 +706,12 @@ export default function HomePage() {
               }
               void runAnalysis(mode, quickMode ? undefined : rules ?? undefined);
             }}
-            disabled={!selectedFile || loading}
+            disabled={!isValidTabularFile(selectedFile) || loading}
           >
             {loading ? "Processando..." : "Processar arquivo"}
           </button>
         </div>
+        {loading && <div className="pill">Processando arquivo e aguardando resposta da API...</div>}
         {error && (
           <div className="pill danger" style={{ width: "fit-content" }}>
             {error}
@@ -385,6 +719,25 @@ export default function HomePage() {
         )}
       </section>
 
+      {debugJson && (
+        <section className="card">
+          <h3 style={{ marginTop: 0 }}>Debug temporario: JSON bruto retornado</h3>
+          <pre
+            style={{
+              margin: 0,
+              whiteSpace: "pre-wrap",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+              fontSize: 12,
+              lineHeight: 1.45,
+              color: "var(--muted)",
+              maxHeight: 320,
+              overflow: "auto",
+            }}
+          >
+            {debugJson}
+          </pre>
+        </section>
+      )}
       {result && !quickMode && rules && (
         <RuleReviewPanel
           qaAnalysis={result.qaAnalysis}

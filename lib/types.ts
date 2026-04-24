@@ -18,6 +18,7 @@ export interface ParsedTabularFile {
   headers: string[];
   rows: RowMap[];
   warnings: string[];
+  errors: string[];
 }
 
 export interface NormalizedDataset {
@@ -73,6 +74,43 @@ export interface DashboardWidget {
   config: Record<string, unknown>;
 }
 
+export type KpiKey =
+  | "ics_medio"
+  | "ics_minimo"
+  | "ics_maximo"
+  | "desvio_padrao_ics"
+  | "total_nao_conformidades"
+  | "nao_conformidades_criticas"
+  | "percentual_nao_conformidade"
+  | "percentual_nao_aplicavel"
+  | "score_medio"
+  | "quantidade_inspecoes";
+
+export type DashboardGrouping = "loja" | "setor" | "template" | "periodo";
+
+export interface OkrInput {
+  objectiveTitle: string;
+  keyResults: Array<{
+    title: string;
+    currentValue: number;
+    targetValue: number;
+  }>;
+}
+
+export interface DashboardCustomizationConfig {
+  selectedKpis: KpiKey[];
+  grouping: DashboardGrouping;
+  debugMode?: boolean;
+  kpiTargets?: Partial<Record<KpiKey, number>>;
+  visibleSections?: {
+    kpiOverview: boolean;
+    sanitaryPerformance: boolean;
+    okr: boolean;
+    risk: boolean;
+  };
+  okrs?: OkrInput[];
+}
+
 export interface ManualQuestionOverride {
   questionText: string;
   behavior: "positive" | "negative" | "neutral" | "ignore";
@@ -99,11 +137,31 @@ export interface ManualReviewConfig {
   notes?: string;
 }
 
+export interface SourceScoreSummary {
+  score: number;
+  totalScore: number;
+  compliancePercentage: number;
+  scoreColumn: string;
+  totalScoreColumn: string;
+  isMaxScore: boolean;
+  explanation: string;
+}
+
 export interface AnalysisResult {
+  debugMode?: boolean;
+  analysisDebug?: {
+    debugMode: boolean;
+  };
   datasetType: DatasetType;
   datasetTypeConfidence: number;
   rowCount: number;
   columnCount: number;
+  detectedColumns: string[];
+  parsingDiagnostics: {
+    partial: boolean;
+    warnings: string[];
+    errors: string[];
+  };
   structuralQuality: {
     score: number;
     label: "limpo" | "intermediario" | "baguncado";
@@ -125,16 +183,67 @@ export interface AnalysisResult {
   alerts: string[];
   summaryText: string;
   interpretedPreview: RowMap[];
+  sourceScore?: SourceScoreSummary;
   qaAnalysis?: {
     totalItems: number;
     realFailures: number;
     nonFailures: number;
     notApplicable: number;
     undetermined: number;
+    sourceScore?: SourceScoreSummary;
     bySection: Array<{ section: string; total: number }>;
     topFailedQuestions: Array<{ question: string; total: number }>;
     weightedIssues: WeightedIssue[];
     ambiguousQuestions: ManualQuestionOverride[];
+  };
+  customDashboards?: {
+    configApplied: DashboardCustomizationConfig;
+    kpiOverview?: {
+      cards: Array<{
+        key: KpiKey;
+        label: string;
+        currentValue: number;
+        currentValueLabel: string;
+        targetValue?: number;
+        targetValueLabel?: string;
+        status: "atingido" | "atencao" | "critico";
+      }>;
+      missingMessage?: string;
+    };
+    sanitaryPerformance?: {
+      widgets: DashboardWidget[];
+      missingMessage?: string;
+    };
+    okr?: {
+      objectives: Array<{
+        objectiveTitle: string;
+        progressPercentage: number;
+        status: "atingido" | "atencao" | "critico";
+        keyResults: Array<{
+          title: string;
+          currentValue: number;
+          targetValue: number;
+          progressPercentage: number;
+          status: "atingido" | "atencao" | "critico";
+        }>;
+      }>;
+      missingMessage?: string;
+    };
+    risk?: {
+      counts: Array<{
+        level: "baixo_risco" | "atencao" | "possivel_multa" | "possivel_interdicao";
+        label: string;
+        count: number;
+      }>;
+      ranking: Array<{
+        group: string;
+        ics: number;
+        failureRate: number;
+        criticalCount: number;
+        level: "baixo_risco" | "atencao" | "possivel_multa" | "possivel_interdicao";
+      }>;
+      missingMessage?: string;
+    };
   };
   transparency: {
     normalizationActions: string[];
@@ -155,4 +264,6 @@ export interface AnalyzeRequestPayload {
   fileBase64: string;
   mode: "quick" | "reviewed";
   rules?: ManualReviewConfig;
+  dashboardConfig?: DashboardCustomizationConfig;
+  debugMode?: boolean;
 }

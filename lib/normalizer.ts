@@ -36,6 +36,11 @@ function normalizeCell(value: unknown): string {
 
 export function normalizeDataset(parsed: ParsedTabularFile): NormalizedDataset {
   const notes: string[] = [];
+  if (parsed.errors.length > 0) {
+    notes.push(
+      `Foram encontrados ${parsed.errors.length} erro(s) de parsing; resultado parcial foi preservado.`,
+    );
+  }
   const { headers, duplicateHeaders } = dedupeHeaders(parsed.headers);
   const mappedRows: RowMap[] = parsed.rows.map((rawRow) => {
     const normalizedRow: RowMap = {};
