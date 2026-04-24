@@ -1,9 +1,12 @@
 import {
   AnalysisResult,
   ColumnType,
+  DashboardCustomizationConfig,
+  DashboardGrouping,
   DashboardWidget,
   DatasetType,
   DatasetTypeInference,
+  KpiKey,
   ManualReviewConfig,
   NormalizedDataset,
   ParsedTabularFile,
@@ -64,6 +67,63 @@ const yesTokens = ["sim", "yes", "y", "true", "1"];
 const noTokens = ["nao", "não", "no", "n", "false", "0"];
 
 const defaultIgnoredRegex = /(coment[aá]rio|evid[eê]ncia|foto|anexo|assinatura|observa[cç][aã]o)/i;
+
+const DEFAULT_DASHBOARD_CONFIG: DashboardCustomizationConfig = {
+  selectedKpis: [],
+  grouping: "loja",
+  kpiTargets: {},
+  visibleSections: {
+    kpiOverview: true,
+    sanitaryPerformance: true,
+    okr: true,
+    risk: true,
+  },
+  okrs: [],
+};
+
+const ALL_KPI_KEYS: KpiKey[] = [
+  "ics_medio",
+  "ics_minimo",
+  "ics_maximo",
+  "desvio_padrao_ics",
+  "total_nao_conformidades",
+  "nao_conformidades_criticas",
+  "percentual_nao_conformidade",
+  "percentual_nao_aplicavel",
+  "score_medio",
+  "quantidade_inspecoes",
+];
+
+DEFAULT_DASHBOARD_CONFIG.selectedKpis = ALL_KPI_KEYS;
+
+const KPI_LABELS: Record<KpiKey, string> = {
+  ics_medio: "ICS médio",
+  ics_minimo: "ICS mínimo",
+  ics_maximo: "ICS máximo",
+  desvio_padrao_ics: "Desvio padrão do ICS",
+  total_nao_conformidades: "Total de não conformidades",
+  nao_conformidades_criticas: "Não conformidades críticas",
+  percentual_nao_conformidade: "% de não conformidade",
+  percentual_nao_aplicavel: "% de não aplicável",
+  score_medio: "Score médio",
+  quantidade_inspecoes: "Quantidade de inspeções",
+};
+
+type StatusLevel = "atingido" | "atencao" | "critico";
+type RiskLevel = "baixo_risco" | "atencao" | "possivel_multa" | "possivel_interdicao";
+
+type GroupInspectionStats = {
+  group: string;
+  total: number;
+  evaluated: number;
+  failures: number;
+  nonFailures: number;
+  na: number;
+  undetermined: number;
+  criticalFailures: number;
+  ics: number;
+  failureRate: number;
+};
 
 function detectColumnTypes(dataset: NormalizedDataset): Record<string, ColumnType> {
   const types: Record<string, ColumnType> = {};
@@ -1487,11 +1547,442 @@ function buildRecommendationsForReview(qaItems: QAItem[]): ManualReviewConfig["q
     }));
 }
 
+function collectGroupStats(
+  qaItems: QAItem[],
+  grouping: DashboardGrouping,
+  sourceScore?: SourceScoreSummary,
+): GroupInspectionStats[] {
+  const grouped = new Map<
+    string,
+    Omit<GroupInspectionStats, "ics" | "failureRate"> & { scoreSum: number; scoreCount: number }
+  >();
+
+  for (const item of qaItems) {
+    const source = item.sourceRow;
+    const store = toStringValue(source.loja ?? source.store ?? source.unidade ?? source.site).trim();
+    const sector = toStringValue(source.setor ?? source.sector ?? source.section ?? item.section ?? source.area).trim();
+    const template = toStringValue(source.template ?? source.modelo ?? source.formulario).trim();
+    const periodIso = toDate(item.date ?? source.data ?? source.date);
+    const period = periodIso ? periodIso.slice(0, 7) : "";
+    const key =
+      (grouping === "loja" && store) ||
+      (grouping === "setor" && sector) ||
+      (grouping === "template" && template) ||
+      (grouping === "periodo" && period) ||
+      (store || sector || template || period || "Nao informado");
+
+    const current = grouped.get(key) ?? {
+      group: key,
+      total: 0,
+      evaluated: 0,
+      failures: 0,
+      nonFailures: 0,
+      na: 0,
+      undetermined: 0,
+      criticalFailures: 0,
+      scoreSum: 0,
+      scoreCount: 0,
+    };
+
+    current.total += 1;
+    if (item.semanticResult === "real_failure") {
+      current.failures += 1;
+      if (item.critical || (item.weight ?? 1) >= 4) {
+        current.criticalFailures += 1;
+      }
+    } else if (item.semanticResult === "non_failure") {
+      current.nonFailures += 1;
+    } else if (item.semanticResult === "na") {
+      current.na += 1;
+    } else {
+      current.undetermined += 1;
+    }
+    if (item.semanticResult === "real_failure" || item.semanticResult === "non_failure") {
+      current.evaluated += 1;
+    }
+    grouped.set(key, current);
+  }
+
+  return [...grouped.values()]
+    .map((entry) => {
+      const denominator = Math.max(entry.evaluated, 1);
+      const failureRate = entry.failures / denominator;
+      const ics = clamp((1 - failureRate) * 100, 0, 100);
+      return {
+        group: entry.group,
+        total: entry.total,
+        evaluated: entry.evaluated,
+        failures: entry.failures,
+        nonFailures: entry.nonFailures,
+        na: entry.na,
+        undetermined: entry.undetermined,
+        criticalFailures: entry.criticalFailures,
+        ics: sourceScore?.compliancePercentage ?? ics,
+        failureRate,
+      };
+    })
+    .sort((a, b) => b.ics - a.ics);
+}
+
+function toStatus(current: number, target?: number, invert = false): StatusLevel {
+  if (target === undefined) {
+    if (invert) {
+      if (current <= 5) return "atingido";
+      if (current <= 15) return "atencao";
+      return "critico";
+    }
+    if (current >= 85) return "atingido";
+    if (current >= 70) return "atencao";
+    return "critico";
+  }
+  if (invert) {
+    if (current <= target) return "atingido";
+    if (current <= target * 1.2) return "atencao";
+    return "critico";
+  }
+  if (current >= target) return "atingido";
+  if (current >= target * 0.85) return "atencao";
+  return "critico";
+}
+
+function formatKpiValue(key: KpiKey, value: number): string {
+  if (
+    key === "ics_medio" ||
+    key === "ics_minimo" ||
+    key === "ics_maximo" ||
+    key === "percentual_nao_conformidade" ||
+    key === "percentual_nao_aplicavel"
+  ) {
+    return `${value.toFixed(1)}%`;
+  }
+  if (key === "desvio_padrao_ics" || key === "score_medio") {
+    return value.toFixed(2);
+  }
+  return Math.round(value).toLocaleString("pt-BR");
+}
+
+function buildCustomDashboards(args: {
+  dataset: NormalizedDataset;
+  qaItems: QAItem[];
+  sourceScore?: SourceScoreSummary;
+  configInput?: DashboardCustomizationConfig;
+  shouldInspect: boolean;
+}): AnalysisResult["customDashboards"] {
+  const mergedVisibleSections: NonNullable<DashboardCustomizationConfig["visibleSections"]> = {
+    kpiOverview: args.configInput?.visibleSections?.kpiOverview ?? true,
+    sanitaryPerformance: args.configInput?.visibleSections?.sanitaryPerformance ?? true,
+    okr: args.configInput?.visibleSections?.okr ?? true,
+    risk: args.configInput?.visibleSections?.risk ?? true,
+  };
+  const merged: DashboardCustomizationConfig = {
+    ...DEFAULT_DASHBOARD_CONFIG,
+    ...args.configInput,
+    selectedKpis:
+      args.configInput?.selectedKpis && args.configInput.selectedKpis.length > 0
+        ? args.configInput.selectedKpis
+        : DEFAULT_DASHBOARD_CONFIG.selectedKpis,
+    kpiTargets: {
+      ...(DEFAULT_DASHBOARD_CONFIG.kpiTargets ?? {}),
+      ...(args.configInput?.kpiTargets ?? {}),
+    },
+    visibleSections: mergedVisibleSections,
+    okrs: args.configInput?.okrs ?? [],
+  };
+
+  const groupStats = collectGroupStats(args.qaItems, merged.grouping, args.sourceScore);
+  const scores = groupStats.map((entry) => entry.ics);
+  const icsMean = scores.length > 0 ? average(scores) : 0;
+  const icsMin = scores.length > 0 ? Math.min(...scores) : 0;
+  const icsMax = scores.length > 0 ? Math.max(...scores) : 0;
+  const std = scores.length > 1 ? Math.sqrt(average(scores.map((value) => (value - icsMean) ** 2))) : 0;
+  const totalInspections = groupStats.reduce((sum, entry) => sum + entry.total, 0);
+  const totalFailures = groupStats.reduce((sum, entry) => sum + entry.failures, 0);
+  const totalCritical = groupStats.reduce((sum, entry) => sum + entry.criticalFailures, 0);
+  const totalNa = groupStats.reduce((sum, entry) => sum + entry.na, 0);
+  const totalEvaluated = groupStats.reduce((sum, entry) => sum + entry.evaluated, 0);
+  const nonConformityPct = totalEvaluated > 0 ? (totalFailures / totalEvaluated) * 100 : 0;
+  const naPct = totalInspections > 0 ? (totalNa / totalInspections) * 100 : 0;
+  const scoreMean = args.sourceScore?.compliancePercentage ?? icsMean;
+
+  const kpiCurrent: Record<KpiKey, number> = {
+    ics_medio: icsMean,
+    ics_minimo: icsMin,
+    ics_maximo: icsMax,
+    desvio_padrao_ics: std,
+    total_nao_conformidades: totalFailures,
+    nao_conformidades_criticas: totalCritical,
+    percentual_nao_conformidade: nonConformityPct,
+    percentual_nao_aplicavel: naPct,
+    score_medio: scoreMean,
+    quantidade_inspecoes: totalInspections,
+  };
+
+  const kpiOverview = mergedVisibleSections.kpiOverview
+    ? {
+        cards:
+          merged.selectedKpis.length > 0
+            ? merged.selectedKpis.map((kpi) => {
+                const currentValue = kpiCurrent[kpi] ?? 0;
+                const targetValue = merged.kpiTargets?.[kpi];
+                const status = toStatus(
+                  currentValue,
+                  targetValue,
+                  kpi === "total_nao_conformidades" ||
+                    kpi === "nao_conformidades_criticas" ||
+                    kpi === "percentual_nao_conformidade" ||
+                    kpi === "percentual_nao_aplicavel" ||
+                    kpi === "desvio_padrao_ics",
+                );
+                return {
+                  key: kpi,
+                  label: KPI_LABELS[kpi],
+                  currentValue,
+                  currentValueLabel: formatKpiValue(kpi, currentValue),
+                  targetValue,
+                  targetValueLabel: targetValue !== undefined ? formatKpiValue(kpi, targetValue) : undefined,
+                  status,
+                };
+              })
+            : [],
+        missingMessage:
+          merged.selectedKpis.length === 0
+            ? "Nenhum KPI foi selecionado para exibição."
+            : groupStats.length === 0
+              ? "Dados insuficientes para calcular os KPIs selecionados."
+              : undefined,
+      }
+    : undefined;
+
+  const sanitaryWidgets: DashboardWidget[] = [];
+  if (args.shouldInspect && groupStats.length >= 2) {
+    sanitaryWidgets.push({
+      id: "sanitary-ics-by-group",
+      title: `ICS por ${merged.grouping}`,
+      description: "Comparação direta do índice de conformidade sanitária.",
+      widgetType: "bar",
+      data: groupStats.map((entry) => ({ grupo: entry.group, ics: Number(entry.ics.toFixed(2)) })),
+      config: { xKey: "grupo", yKey: "ics" },
+    });
+    sanitaryWidgets.push({
+      id: "sanitary-ranking",
+      title: `Ranking sanitário por ${merged.grouping}`,
+      description: "Ordenação do melhor para o pior desempenho sanitário.",
+      widgetType: "bar",
+      data: [...groupStats]
+        .sort((a, b) => b.ics - a.ics)
+        .slice(0, 12)
+        .map((entry) => ({ grupo: entry.group, ics: Number(entry.ics.toFixed(2)) })),
+      config: { xKey: "grupo", yKey: "ics" },
+    });
+    if (merged.grouping !== "periodo") {
+      const byPeriod = collectGroupStats(args.qaItems, "periodo", args.sourceScore);
+      if (byPeriod.length >= 2) {
+        sanitaryWidgets.push({
+          id: "sanitary-ics-trend",
+          title: "Evolução do ICS por período",
+          description: "Tendência do desempenho sanitário ao longo do tempo.",
+          widgetType: "line",
+          data: byPeriod
+            .sort((a, b) => (a.group > b.group ? 1 : -1))
+            .map((entry) => ({ periodo: entry.group, ics: Number(entry.ics.toFixed(2)) })),
+          config: { xKey: "periodo", yKey: "ics" },
+        });
+      }
+    }
+    const severity = new Map<string, number>([
+      ["Leve", 0],
+      ["Moderada", 0],
+      ["Grave", 0],
+      ["Critica", 0],
+    ]);
+    for (const item of args.qaItems) {
+      if (item.semanticResult !== "real_failure") continue;
+      const severityLabel =
+        (item.weight ?? 1) >= 5 || item.critical
+          ? "Critica"
+          : (item.weight ?? 1) >= 4
+            ? "Grave"
+            : (item.weight ?? 1) >= 2
+              ? "Moderada"
+              : "Leve";
+      severity.set(severityLabel, (severity.get(severityLabel) ?? 0) + 1);
+    }
+    sanitaryWidgets.push({
+      id: "sanitary-severity-distribution",
+      title: "Distribuição de não conformidades por gravidade",
+      description: "Volume de falhas dividido por criticidade.",
+      widgetType: "pie",
+      data: [...severity.entries()].map(([label, value]) => ({ label, value })),
+      config: { nameKey: "label", valueKey: "value" },
+    });
+    const bySection = countBy(
+      args.qaItems
+        .filter((item) => item.semanticResult === "real_failure")
+        .map((item) => item.section || "Sem seção"),
+    );
+    if (bySection.size > 0) {
+      sanitaryWidgets.push({
+        id: "sanitary-failures-by-section",
+        title: "Não conformidades por seção",
+        description: "Seções com maior concentração de não conformidades.",
+        widgetType: "bar",
+        data: topN(bySection, 12).map(([secao, total]) => ({ secao, total })),
+        config: { xKey: "secao", yKey: "total" },
+      });
+    }
+    const byQuestion = countBy(
+      args.qaItems
+        .filter((item) => item.semanticResult === "real_failure")
+        .map((item) => item.question),
+    );
+    if (byQuestion.size > 0) {
+      sanitaryWidgets.push({
+        id: "sanitary-top-fail-questions",
+        title: "Top perguntas com mais falhas",
+        description: "Perguntas com maior recorrência de não conformidade.",
+        widgetType: "bar",
+        data: topN(byQuestion, 10).map(([pergunta, total]) => ({ pergunta, total })),
+        config: { xKey: "pergunta", yKey: "total" },
+      });
+    }
+    sanitaryWidgets.push({
+      id: "sanitary-risky-groups",
+      title: `${merged.grouping} com possível risco de multa/interdição`,
+      description: "Grupos com pior ICS e maior taxa de falha.",
+      widgetType: "table",
+      data: [...groupStats]
+        .sort((a, b) => a.ics - b.ics)
+        .slice(0, 10)
+        .map((entry) => ({
+          grupo: entry.group,
+          ics: Number(entry.ics.toFixed(2)),
+          "% falha": Number((entry.failureRate * 100).toFixed(2)),
+          criticas: entry.criticalFailures,
+        })),
+      config: { columns: ["grupo", "ics", "% falha", "criticas"] },
+    });
+  }
+
+  const sanitaryPerformance = mergedVisibleSections.sanitaryPerformance
+    ? {
+        widgets: sanitaryWidgets,
+        missingMessage:
+          sanitaryWidgets.length === 0
+            ? "Dados insuficientes para montar o dashboard de performance sanitária."
+            : undefined,
+      }
+    : undefined;
+
+  const riskRanking: Array<{
+    group: string;
+    ics: number;
+    failureRate: number;
+    criticalCount: number;
+    level: RiskLevel;
+  }> = groupStats.map((entry) => {
+    const level: RiskLevel =
+      entry.ics < 50 || entry.criticalFailures >= 3
+        ? "possivel_interdicao"
+        : entry.ics < 70 || entry.criticalFailures >= 1
+          ? "possivel_multa"
+          : entry.ics < 85
+            ? "atencao"
+            : "baixo_risco";
+    return {
+      group: entry.group,
+      ics: Number(entry.ics.toFixed(2)),
+      failureRate: Number((entry.failureRate * 100).toFixed(2)),
+      criticalCount: entry.criticalFailures,
+      level: level as RiskLevel,
+    };
+  });
+
+  const riskCountsMap = new Map<RiskLevel, number>([
+    ["baixo_risco", 0],
+    ["atencao", 0],
+    ["possivel_multa", 0],
+    ["possivel_interdicao", 0],
+  ]);
+  for (const item of riskRanking) {
+    riskCountsMap.set(item.level, (riskCountsMap.get(item.level) ?? 0) + 1);
+  }
+  const riskCounts: NonNullable<NonNullable<AnalysisResult["customDashboards"]>["risk"]>["counts"] = [
+    { level: "baixo_risco", label: "Baixo risco", count: riskCountsMap.get("baixo_risco") ?? 0 },
+    { level: "atencao", label: "Atenção", count: riskCountsMap.get("atencao") ?? 0 },
+    { level: "possivel_multa", label: "Possível risco de multa", count: riskCountsMap.get("possivel_multa") ?? 0 },
+    {
+      level: "possivel_interdicao",
+      label: "Possível risco de interdição",
+      count: riskCountsMap.get("possivel_interdicao") ?? 0,
+    },
+  ];
+
+  const risk = mergedVisibleSections.risk
+    ? {
+        counts: riskCounts,
+        ranking: riskRanking.sort((a, b) => {
+          const order = {
+            possivel_interdicao: 4,
+            possivel_multa: 3,
+            atencao: 2,
+            baixo_risco: 1,
+          } satisfies Record<RiskLevel, number>;
+          return order[b.level] - order[a.level] || a.ics - b.ics;
+        }),
+        missingMessage:
+          riskRanking.length === 0
+            ? "Dados insuficientes para calcular painel de risco sanitário."
+            : undefined,
+      }
+    : undefined;
+
+  const okrObjectives = (merged.okrs ?? []).map((objective) => {
+    const keyResults = objective.keyResults.map((kr) => {
+      const target = Math.max(kr.targetValue, 0.000001);
+      const progress = clamp((kr.currentValue / target) * 100, 0, 200);
+      const status = toStatus(progress, 100);
+      return {
+        title: kr.title,
+        currentValue: kr.currentValue,
+        targetValue: kr.targetValue,
+        progressPercentage: Number(progress.toFixed(1)),
+        status,
+      };
+    });
+    const objectiveProgress =
+      keyResults.length > 0 ? average(keyResults.map((kr) => kr.progressPercentage)) : 0;
+    return {
+      objectiveTitle: objective.objectiveTitle,
+      progressPercentage: Number(objectiveProgress.toFixed(1)),
+      status: toStatus(objectiveProgress, 100),
+      keyResults,
+    };
+  });
+  const okr = mergedVisibleSections.okr
+    ? {
+        objectives: okrObjectives,
+        missingMessage:
+          okrObjectives.length === 0
+            ? "Nenhum OKR foi definido. Cadastre objetivos e resultados-chave para acompanhar progresso."
+            : undefined,
+      }
+    : undefined;
+
+  return {
+    configApplied: merged,
+    kpiOverview,
+    sanitaryPerformance,
+    okr,
+    risk,
+  };
+}
+
 export function analyzeDataset(
   parsed: ParsedTabularFile,
   normalized: NormalizedDataset,
   inference: DatasetTypeInference,
   reviewConfig?: ManualReviewConfig,
+  dashboardConfigInput?: DashboardCustomizationConfig,
 ): AnalysisResult {
   const columnTypes = detectColumnTypes(normalized);
   const structure = structuralQuality(normalized);
@@ -1573,6 +2064,13 @@ export function analyzeDataset(
     }
   }
   const mergedSummaryText = summaryTextParts.join(" ");
+  const customDashboards = buildCustomDashboards({
+    dataset: normalized,
+    qaItems,
+    sourceScore: sourceScoreSummary,
+    configInput: dashboardConfigInput,
+    shouldInspect,
+  });
 
   return {
     datasetType: inference.datasetType,
@@ -1636,6 +2134,7 @@ export function analyzeDataset(
             ambiguousQuestions: buildRecommendationsForReview(qaItems),
           }
         : undefined,
+    customDashboards,
     transparency: {
       normalizationActions: normalized.normalizationNotes,
       parsingWarnings: [...parsed.warnings, ...parsed.errors],

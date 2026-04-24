@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { runAnalysisPipeline } from "@/lib/pipeline";
 import { appendDebugLog } from "@/lib/debugLog";
+import { DashboardCustomizationConfig, KpiKey } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -34,11 +35,55 @@ const reviewSchema = z.object({
   notes: z.string().optional(),
 });
 
+const kpiKeySchema = z.enum([
+  "ics_medio",
+  "ics_minimo",
+  "ics_maximo",
+  "desvio_padrao_ics",
+  "total_nao_conformidades",
+  "nao_conformidades_criticas",
+  "percentual_nao_conformidade",
+  "percentual_nao_aplicavel",
+  "score_medio",
+  "quantidade_inspecoes",
+] as [KpiKey, ...KpiKey[]]);
+
+const dashboardConfigSchema = z.object({
+  selectedKpis: z.array(kpiKeySchema).default([]),
+  grouping: z.enum(["loja", "setor", "template", "periodo"]).default("loja"),
+  kpiTargets: z.record(kpiKeySchema, z.number()).optional(),
+  visibleSections: z
+    .object({
+      kpiOverview: z.boolean().default(true),
+      sanitaryPerformance: z.boolean().default(true),
+      okr: z.boolean().default(true),
+      risk: z.boolean().default(true),
+    })
+    .optional(),
+  okrs: z
+    .array(
+      z.object({
+        objectiveTitle: z.string().min(1),
+        keyResults: z
+          .array(
+            z.object({
+              title: z.string().min(1),
+              currentValue: z.number(),
+              targetValue: z.number(),
+            }),
+          )
+          .default([]),
+      }),
+    )
+    .default([]),
+});
+
 const requestSchema = z.object({
   fileName: z.string().min(3),
   fileBase64: z.string().min(8),
   mode: z.enum(["quick", "reviewed"]).default("quick"),
   rules: reviewSchema.optional(),
+  dashboardConfig: dashboardConfigSchema.optional(),
 });
 
 function toArrayBuffer(buffer: Buffer): ArrayBuffer {
@@ -85,19 +130,19 @@ export async function POST(request: Request) {
         mode: payload.mode,
         fileName: payload.fileName,
         hasRules: Boolean(payload.rules),
+        hasDashboardConfig: Boolean(payload.dashboardConfig),
+        okrCount: payload.dashboardConfig?.okrs.length ?? 0,
         base64Length: payload.fileBase64.length,
       },
       timestamp: Date.now(),
     });
     // #endregion
-    const result = runAnalysisPipeline(
-      payload.fileName,
-      toArrayBuffer(fileBuffer),
-      {
-        mode: payload.mode,
-        rules: payload.rules,
-      },
-    );
+    const dashboardConfig = payload.dashboardConfig as DashboardCustomizationConfig | undefined;
+    const result = runAnalysisPipeline(payload.fileName, toArrayBuffer(fileBuffer), {
+      mode: payload.mode,
+      rules: payload.rules,
+      dashboardConfig,
+    });
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {

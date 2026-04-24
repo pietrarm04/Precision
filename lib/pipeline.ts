@@ -2,12 +2,16 @@ import { analyzeDataset } from "@/lib/analysis";
 import { inferDatasetType } from "@/lib/heuristics";
 import { normalizeDataset } from "@/lib/normalizer";
 import { parseTabularFile } from "@/lib/parser";
-import { AnalysisResult, ManualReviewConfig } from "@/lib/types";
+import { AnalysisResult, DashboardCustomizationConfig, ManualReviewConfig } from "@/lib/types";
 
 export function runAnalysisPipeline(
   fileName: string,
   bytes: ArrayBuffer,
-  options?: { mode?: "quick" | "reviewed"; rules?: ManualReviewConfig },
+  options?: {
+    mode?: "quick" | "reviewed";
+    rules?: ManualReviewConfig;
+    dashboardConfig?: DashboardCustomizationConfig;
+  },
 ): AnalysisResult {
   const parsed = parseTabularFile(fileName, bytes);
   if (parsed.headers.length === 0 || parsed.rows.length === 0) {
@@ -70,6 +74,42 @@ export function runAnalysisPipeline(
           notes: "Resposta parcial gerada por robustez de parsing.",
         },
       },
+      customDashboards: {
+        configApplied: {
+          selectedKpis: [],
+          grouping: "loja",
+          kpiTargets: {},
+          visibleSections: {
+            kpiOverview: true,
+            sanitaryPerformance: true,
+            okr: true,
+            risk: true,
+          },
+          okrs: [],
+        },
+        kpiOverview: {
+          cards: [],
+          missingMessage: "Dados insuficientes para calcular KPIs.",
+        },
+        sanitaryPerformance: {
+          widgets: [],
+          missingMessage: "Dados insuficientes para montar performance sanitária.",
+        },
+        okr: {
+          objectives: [],
+          missingMessage: "Nenhum OKR definido.",
+        },
+        risk: {
+          counts: [
+            { level: "baixo_risco", label: "Baixo risco", count: 0 },
+            { level: "atencao", label: "Atenção", count: 0 },
+            { level: "possivel_multa", label: "Possível risco de multa", count: 0 },
+            { level: "possivel_interdicao", label: "Possível risco de interdição", count: 0 },
+          ],
+          ranking: [],
+          missingMessage: "Dados insuficientes para calcular risco sanitário.",
+        },
+      },
       normalizedRowsForExport: parsed.rows,
     };
   }
@@ -84,7 +124,13 @@ export function runAnalysisPipeline(
         }
       : undefined;
 
-  const result = analyzeDataset(parsed, normalized, inference, rules);
+  const result = analyzeDataset(
+    parsed,
+    normalized,
+    inference,
+    rules,
+    options?.dashboardConfig,
+  );
   return {
     ...result,
     summaryText: buildSummaryText(result),

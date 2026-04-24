@@ -17,6 +17,7 @@ function qualityPill(score: number): { text: string; cls: string } {
 export function ResultsView({ result }: Props) {
   const q = qualityPill(result.structuralQuality.score);
   const sourceScore = result.sourceScore ?? result.qaAnalysis?.sourceScore;
+  const custom = result.customDashboards;
   const complianceText = sourceScore
     ? `${sourceScore.compliancePercentage.toFixed(sourceScore.isMaxScore ? 0 : 1)}% de conformidade`
     : null;
@@ -83,6 +84,180 @@ export function ResultsView({ result }: Props) {
           ))}
         </div>
       </div>
+
+      {custom?.kpiOverview && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Dashboard de KPIs</h3>
+          {custom.kpiOverview.cards.length > 0 ? (
+            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
+              {custom.kpiOverview.cards.map((card) => {
+                const cls =
+                  card.status === "atingido" ? "pill success" : card.status === "atencao" ? "pill warn" : "pill danger";
+                return (
+                  <div key={card.key} className="card" style={{ padding: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                      <strong>{card.label}</strong>
+                      <span className={cls}>{card.status}</span>
+                    </div>
+                    <div style={{ fontSize: 24, fontWeight: 700, marginTop: 8 }}>{card.currentValueLabel}</div>
+                    <div style={{ color: "var(--muted)", fontSize: 13, marginTop: 4 }}>
+                      Meta: {card.targetValueLabel ?? "não definida"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p style={{ margin: 0, color: "var(--muted)" }}>
+              {custom.kpiOverview.missingMessage ?? "Dados insuficientes para KPI overview."}
+            </p>
+          )}
+        </div>
+      )}
+
+      {custom?.sanitaryPerformance && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Dashboard de performance sanitária</h3>
+          {custom.sanitaryPerformance.widgets.length > 0 ? (
+            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 10 }}>
+              {custom.sanitaryPerformance.widgets.map((widget) => (
+                <ChartRenderer key={widget.id} widget={widget} />
+              ))}
+            </div>
+          ) : (
+            <p style={{ margin: 0, color: "var(--muted)" }}>
+              {custom.sanitaryPerformance.missingMessage ??
+                "Dados insuficientes para montar gráficos sanitários confiáveis."}
+            </p>
+          )}
+        </div>
+      )}
+
+      {custom?.risk && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Painel de risco sanitário</h3>
+          {custom.risk.ranking.length > 0 ? (
+            <>
+              <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
+                {custom.risk.counts.map((item) => (
+                  <div key={item.level} className="card" style={{ padding: 12 }}>
+                    <strong>{item.label}</strong>
+                    <div style={{ fontSize: 24, fontWeight: 700, marginTop: 6 }}>{item.count}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 12, maxHeight: 260, overflow: "auto" }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Grupo</th>
+                      <th>Nível de risco</th>
+                      <th>ICS</th>
+                      <th>% falha</th>
+                      <th>Críticas</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {custom.risk.ranking.slice(0, 20).map((item) => (
+                      <tr key={`${item.group}-${item.level}`}>
+                        <td>{item.group}</td>
+                        <td>{item.level.replaceAll("_", " ")}</td>
+                        <td>{item.ics.toFixed(2)}</td>
+                        <td>{item.failureRate.toFixed(2)}%</td>
+                        <td>{item.criticalCount}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
+            <p style={{ margin: 0, color: "var(--muted)" }}>
+              {custom.risk.missingMessage ?? "Sem dados suficientes para painel de risco."}
+            </p>
+          )}
+        </div>
+      )}
+
+      {custom?.okr && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Dashboard de OKRs</h3>
+          {custom.okr.objectives.length > 0 ? (
+            <div className="grid" style={{ gap: 10 }}>
+              {custom.okr.objectives.map((objective) => (
+                <div key={objective.objectiveTitle} className="card" style={{ padding: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                    <strong>{objective.objectiveTitle}</strong>
+                    <span
+                      className={
+                        objective.status === "atingido"
+                          ? "pill success"
+                          : objective.status === "atencao"
+                            ? "pill warn"
+                            : "pill danger"
+                      }
+                    >
+                      {objective.status}
+                    </span>
+                  </div>
+                  <div style={{ marginTop: 8, color: "var(--muted)" }}>
+                    Progresso do objetivo: {objective.progressPercentage.toFixed(1)}%
+                  </div>
+                  <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+                    {objective.keyResults.map((kr) => (
+                      <div key={`${objective.objectiveTitle}-${kr.title}`} className="card" style={{ padding: 10 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                          <span>{kr.title}</span>
+                          <span
+                            className={
+                              kr.status === "atingido"
+                                ? "pill success"
+                                : kr.status === "atencao"
+                                  ? "pill warn"
+                                  : "pill danger"
+                            }
+                          >
+                            {kr.status}
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            marginTop: 6,
+                            height: 8,
+                            borderRadius: 999,
+                            background: "rgba(255,255,255,0.14)",
+                            overflow: "hidden",
+                          }}
+                        >
+                          <div
+                            style={{
+                              width: `${Math.min(100, Math.max(0, kr.progressPercentage))}%`,
+                              height: "100%",
+                              background:
+                                kr.status === "atingido"
+                                  ? "var(--success)"
+                                  : kr.status === "atencao"
+                                    ? "var(--warning)"
+                                    : "var(--danger)",
+                            }}
+                          />
+                        </div>
+                        <div style={{ marginTop: 6, fontSize: 13, color: "var(--muted)" }}>
+                          Atual: {kr.currentValue} | Meta: {kr.targetValue} | Progresso: {kr.progressPercentage.toFixed(1)}%
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p style={{ margin: 0, color: "var(--muted)" }}>
+              {custom.okr.missingMessage ?? "Nenhum OKR disponível para visualização."}
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="grid" style={{ gridTemplateColumns: "2fr 1fr", alignItems: "start" }}>
         <div className="card">
