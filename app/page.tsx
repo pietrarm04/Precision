@@ -344,15 +344,7 @@ export default function HomePage() {
       const file = new File([decodeBase64(data.fileBase64)], data.fileName, {
         type: data.mimeType ?? "application/octet-stream",
       });
-      setUploadedUnits((prev) => {
-        const unit = makeUploadedUnit(file);
-        const next = [...prev, unit];
-        const byFingerprint = new Map<string, UploadedUnit>();
-        for (const item of next) {
-          byFingerprint.set(fileFingerprint(item.file), item);
-        }
-        return [...byFingerprint.values()];
-      });
+      setUploadedUnits((prev) => [...prev, makeUploadedUnit(file)]);
       setResult(null);
       setDebugJson(null);
       setRules(null);
@@ -439,13 +431,7 @@ export default function HomePage() {
               setError("Arquivo invalido. Envie apenas CSV, XLSX ou XLS.");
               return;
             }
-            setUploadedUnits((prev) => {
-              const existing = new Set(prev.map((item) => fileFingerprint(item.file)));
-              const additions = files
-                .filter((file) => !existing.has(fileFingerprint(file)))
-                .map((file) => makeUploadedUnit(file));
-              return [...prev, ...additions];
-            });
+            setUploadedUnits((prev) => [...prev, ...files.map((file) => makeUploadedUnit(file))]);
             setResult(null);
             setDebugJson(null);
             setRules(null);
