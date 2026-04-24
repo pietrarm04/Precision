@@ -17,16 +17,15 @@ function qualityPill(score: number): { text: string; cls: string } {
 export function ResultsView({ result }: Props) {
   const q = qualityPill(result.structuralQuality.score);
   const sourceScore = result.sourceScore ?? result.qaAnalysis?.sourceScore;
+  const computedIcs = result.qaAnalysis?.ics;
   const custom = result.customDashboards;
   const isDebugMode = Boolean(result.debugMode);
   const complianceText = sourceScore
-    ? `${sourceScore.compliancePercentage.toFixed(sourceScore.isMaxScore ? 0 : 1)}% de conformidade`
+    ? `${sourceScore.compliancePercentage.toFixed(sourceScore.isMaxScore ? 0 : 1)}% (pontuação oficial)`
     : null;
-  const complianceExplanation = sourceScore?.isMaxScore
-    ? "Nenhuma não conformidade identificada. Pontuação máxima atingida."
-    : sourceScore
-      ? `Pontuação no arquivo de origem: ${sourceScore.score}/${sourceScore.totalScore}. Nenhuma não conformidade identificada.`
-      : null;
+  const complianceExplanation = sourceScore
+    ? `Pontuação oficial do arquivo: ${sourceScore.score}/${sourceScore.totalScore}.`
+    : null;
   return (
     <div className="grid" style={{ gap: 20 }}>
       <div className="card">
@@ -67,6 +66,11 @@ export function ResultsView({ result }: Props) {
             {sourceScore.compliancePercentage.toFixed(sourceScore.isMaxScore ? 0 : 1)}% da pontuação total
             disponível.
           </p>
+          {computedIcs !== undefined && (
+            <p style={{ margin: "0 0 8px", color: "var(--muted)" }}>
+              ICS calculado pelo sistema: <strong>{computedIcs.toFixed(1)}%</strong> (Sim / (Sim + Não)).
+            </p>
+          )}
           {complianceExplanation && (
             <p style={{ margin: 0, color: sourceScore.isMaxScore ? "var(--success)" : "var(--muted)" }}>
               {complianceExplanation}

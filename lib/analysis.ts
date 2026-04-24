@@ -186,6 +186,9 @@ function parseAsOutcome(rawValue: unknown): QAOutcome {
   if (naTokens.some((token) => normalized === token || normalized.includes(token))) {
     return "na";
   }
+  if (noTokens.includes(normalized)) {
+    return "no";
+  }
   if (statusFailTokens.some((token) => normalized.includes(token))) {
     return "fail";
   }
@@ -194,9 +197,6 @@ function parseAsOutcome(rawValue: unknown): QAOutcome {
   }
   if (yesTokens.includes(normalized)) {
     return "yes";
-  }
-  if (noTokens.includes(normalized)) {
-    return "no";
   }
   return "unknown";
 }
@@ -245,52 +245,6 @@ function mapWideInspectionSemanticResult(outcome: QAOutcome, responseRaw: string
   return applySemanticRule(outcome, responseRaw);
 }
 
-function inferQuestionPolarity(question: string): SemanticQuestionPolarity {
-  const q = question.toLowerCase();
-  const negativeClues = [
-    "vazamento",
-    "odor",
-    "praga",
-    "risco",
-    "dano",
-    "contamin",
-    "obstr",
-    "defeito",
-    "sujeira",
-    "falha",
-    "nao conforme",
-    "não conforme",
-    "incidente",
-  ];
-  const positiveClues = [
-    "conforme",
-    "limpo",
-    "adequado",
-    "organizado",
-    "funcionando",
-    "em ordem",
-    "disponivel",
-    "disponível",
-    "seguro",
-    "completo",
-    "correto",
-  ];
-
-  if (negativeClues.some((clue) => q.includes(clue))) {
-    return "negative";
-  }
-  if (positiveClues.some((clue) => q.includes(clue))) {
-    return "positive";
-  }
-  if (q.includes("ausencia") || q.includes("ausência")) {
-    return "negative";
-  }
-  if (q.includes("existe") || q.startsWith("ha ") || q.startsWith("há ")) {
-    return "negative";
-  }
-  return "neutral";
-}
-
 function applySemanticRule(outcome: QAOutcome, responseRaw: string): "real_failure" | "non_failure" | "na" | "undetermined" {
   if (isMissing(responseRaw)) {
     return "na";
@@ -308,18 +262,6 @@ function applySemanticRule(outcome: QAOutcome, responseRaw: string): "real_failu
     return "undetermined";
   }
   return "undetermined";
-}
-
-function resolveQuestionType(
-  question: string,
-  outcome: QAOutcome,
-  config: ManualReviewConfig | undefined,
-): SemanticQuestionPolarity {
-  const byQuestion = config?.questionOverrides.find((entry) => entry.questionText === question);
-  if (byQuestion && byQuestion.behavior !== "ignore") {
-    return byQuestion.behavior;
-  }
-  return "neutral";
 }
 
 function questionIsIgnored(question: string, config: ManualReviewConfig | undefined): boolean {
@@ -1645,7 +1587,6 @@ function buildRecommendationsForReview(qaItems: QAItem[]): ManualReviewConfig["q
 function collectGroupStats(
   qaItems: QAItem[],
   grouping: DashboardGrouping,
-  sourceScore?: SourceScoreSummary,
 ): GroupInspectionStats[] {
   const grouped = new Map<
     string,
@@ -1784,7 +1725,7 @@ function buildCustomDashboards(args: {
     okrs: args.configInput?.okrs ?? [],
   };
 
-  const groupStats = collectGroupStats(args.qaItems, merged.grouping, args.sourceScore);
+  const groupStats = collectGroupStats(args.qaItems, merged.grouping);
   const scores = groupStats.map((entry) => entry.ics);
   const icsMean = scores.length > 0 ? average(scores) : 0;
   const icsMin = scores.length > 0 ? Math.min(...scores) : 0;
@@ -1870,7 +1811,7 @@ function buildCustomDashboards(args: {
       config: { xKey: "grupo", yKey: "ics" },
     });
     if (merged.grouping !== "periodo") {
-      const byPeriod = collectGroupStats(args.qaItems, "periodo", args.sourceScore);
+      const byPeriod = collectGroupStats(args.qaItems, "periodo");
       if (byPeriod.length >= 2) {
         sanitaryWidgets.push({
           id: "sanitary-ics-trend",
@@ -2183,6 +2124,11 @@ export function analyzeDataset(
     }
   }
   if (qaItems.length > 0) {
+    summaryTextParts.push(
+      `Pontuacao oficial do arquivo: ${
+        sourceScoreSummary ? `${sourceScoreSummary.score}/${sourceScoreSummary.totalScore}` : "nao disponivel"
+      }.`,
+    );
     summaryTextParts.push(
       `ICS calculado pelo sistema: ${ics.toFixed(1)}% (Sim / (Sim + Não) = ${conformingAnswers}/${evaluatedAnswers}).`,
     );
