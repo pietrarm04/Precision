@@ -65,6 +65,9 @@ const statusFailTokens = [
 const naTokens = ["na", "n/a", "não se aplica", "nao se aplica", "not applicable"];
 const yesTokens = ["sim", "yes", "y", "true", "1"];
 const noTokens = ["nao", "não", "no", "n", "false", "0"];
+const inspectionPrefixRegex = /^inspection(?:[_\s-]|$)/i;
+const inspectionIgnoredCoreRegex =
+  /(^|_)(auditid|audit_id|score|totalscore|total_score|title_page|titlepage|title|page_title)(_|$)/i;
 
 const defaultIgnoredRegex = /(coment[aá]rio|evid[eê]ncia|foto|anexo|assinatura|observa[cç][aã]o)/i;
 
@@ -196,6 +199,62 @@ function parseAsOutcome(rawValue: unknown): QAOutcome {
     return "no";
   }
   return "unknown";
+}
+
+function normalizeInspectionHeaderCore(header: string): string {
+  const normalized = header
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_")
+    .replace(/^inspection(?:_+)?/, "");
+  return normalized;
+}
+
+function isInspectionQuestionColumn(header: string): boolean {
+  if (!inspectionPrefixRegex.test(header)) {
+    return false;
+  }
+  const core = normalizeInspectionHeaderCore(header);
+  if (!core) {
+    return false;
+  }
+  if (core.endsWith("_note") || core.endsWith("_notes")) {
+    return false;
+  }
+  if (inspectionIgnoredCoreRegex.test(core)) {
+    return false;
+  }
+  return true;
+}
+
+function deriveSectionAndQuestionFromInspectionColumn(header: string): { section: string; question: string } {
+  const core = normalizeInspectionHeaderCore(header);
+  const tokens = core.split("_").filter(Boolean);
+  const toLabel = (value: string) => value.replace(/_/g, " ").replace(/\s+/g, " ").trim();
+
+  const sectionToken = tokens[0] ?? "sem_secao";
+  const questionToken = tokens.slice(1).join("_") || core || sectionToken;
+
+  return {
+    section: toLabel(sectionToken) || "Sem secao",
+    question: toLabel(questionToken) || "(pergunta nao identificada)",
+  };
+}
+
+function mapWideInspectionSemanticResult(outcome: QAOutcome, responseRaw: string): "real_failure" | "non_failure" | "na" | "undetermined" {
+  if (isMissing(responseRaw)) {
+    return "na";
+  }
+  if (outcome === "na") {
+    return "na";
+  }
+  if (outcome === "pass" || outcome === "yes") {
+    return "non_failure";
+  }
+  if (outcome === "fail" || outcome === "no") {
+    return "real_failure";
+  }
+  return "undetermined";
 }
 
 function inferQuestionPolarity(question: string): SemanticQuestionPolarity {
@@ -370,8 +429,45 @@ function buildInspectionItems(
   config: ManualReviewConfig | undefined,
 ): { items: QAItem[]; stats: Record<string, number> } {
   const { questionCol, answerCol, sectionCol, dateCol } = detectInspectionFields(dataset, inference);
+  const inspectionColumns = dataset.headers.filter(isInspectionQuestionColumn);
   const items: QAItem[] = [];
   let ignoredCount = 0;
+
+  if (inspectionColumns.length > 0) {
+    for (const row of dataset.rows) {
+      for (const column of inspectionColumns) {
+        const { section, question } = deriveSectionAndQuestionFromInspectionColumn(column);
+        if (questionIsIgnored(question, config)) {
+          ignoredCount += 1;
+          continue;
+        }
+        const responseRaw = toStringValue(row[column]).trim();
+        const outcome = parseAsOutcome(responseRaw);
+        const semantics = mapWideInspectionSemanticResult(outcome, responseRaw);
+        const criticalOverride = config?.questionOverrides.find((q) => q.questionText === question)?.critical ?? false;
+        const weight = questionWeight(question, section || undefined, config);
+
+        items.push({
+          question,
+          responseRaw,
+          normalizedOutcome: outcome,
+          section,
+          date: dateCol ? toStringValue(row[dateCol]) : undefined,
+          semanticPolarity: resolveQuestionType(question, outcome, config),
+          semanticResult: semantics,
+          critical: criticalOverride,
+          weight,
+          sourceRow: row,
+        });
+      }
+    }
+    return {
+      items,
+      stats: {
+        ignoredCount,
+      },
+    };
+  }
 
   for (const row of dataset.rows) {
     const question = toStringValue(questionCol ? row[questionCol] : "").trim();
@@ -1281,6 +1377,10 @@ function createDataPreview(dataset: NormalizedDataset, limit = 12): Record<strin
 }
 
 function findSourceScoreColumns(dataset: NormalizedDataset): { scoreColumn?: string; totalScoreColumn?: string } {
+  if (dataset.headers.some(isInspectionQuestionColumn)) {
+    return {};
+  }
+
   const byKeyword = (pattern: RegExp, excludes?: RegExp) =>
     dataset.headers.find((header) => {
       const normalized = header.toLowerCase();
@@ -2032,8 +2132,31 @@ export function analyzeDataset(
     ? buildInspectionItems(normalized, inference, reviewConfig)
     : { items: [] as QAItem[] };
   const weightedIssues = calculateWeightedIssues(qaItems);
+  const totalItems = qaItems.length;
+  const realFailures = qaItems.filter((item) => item.semanticResult === "real_failure").length;
+  const conformingAnswers = qaItems.filter((item) => item.semanticResult === "non_failure").length;
+  const notApplicable = qaItems.filter((item) => item.semanticResult === "na").length;
+  const undetermined = qaItems.filter((item) => item.semanticResult === "undetermined").length;
+  const evaluatedAnswers = realFailures + conformingAnswers;
+  const ics = clamp((1 - realFailures / Math.max(evaluatedAnswers, 1)) * 100, 0, 100);
+  const failuresBySection = topN(
+    countBy(
+      qaItems
+        .filter((item) => item.semanticResult === "real_failure")
+        .map((item) => item.section || "Sem secao"),
+    ),
+    30,
+  ).map(([section, total]) => ({ section, total }));
+  const failuresByQuestion = topN(
+    countBy(
+      qaItems
+        .filter((item) => item.semanticResult === "real_failure")
+        .map((item) => item.question),
+    ),
+    20,
+  ).map(([question, total]) => ({ question, total }));
 
-  const sourceScoreSummary = buildSourceScoreSummary(normalized);
+  const sourceScoreSummary = shouldInspect ? undefined : buildSourceScoreSummary(normalized);
   const summaryCards = createSummaryCards(
     normalized,
     inference,
@@ -2156,28 +2279,20 @@ export function analyzeDataset(
     interpretedPreview: preview,
     sourceScore: sourceScoreSummary,
     qaAnalysis:
-      qaItems.length > 0
+      totalItems > 0
         ? {
-            totalItems: qaItems.length,
-            realFailures: qaItems.filter((item) => item.semanticResult === "real_failure").length,
-            nonFailures: qaItems.filter((item) => item.semanticResult === "non_failure").length,
-            notApplicable: qaItems.filter((item) => item.semanticResult === "na").length,
-            undetermined: qaItems.filter((item) => item.semanticResult === "undetermined").length,
+            totalItems,
+            realFailures,
+            nonFailures: conformingAnswers,
+            conformingAnswers,
+            notApplicable,
+            undetermined,
+            ics,
             sourceScore: sourceScoreSummary,
-            bySection: topN(
-              countBy(
-                qaItems.map((item) => item.section || "Sem secao"),
-              ),
-              30,
-            ).map(([section, total]) => ({ section, total })),
-            topFailedQuestions: topN(
-              countBy(
-                qaItems
-                  .filter((item) => item.semanticResult === "real_failure")
-                  .map((item) => item.question),
-              ),
-              20,
-            ).map(([question, total]) => ({ question, total })),
+            bySection: failuresBySection,
+            failuresBySection,
+            topFailedQuestions: failuresByQuestion,
+            failuresByQuestion,
             weightedIssues,
             ambiguousQuestions: buildRecommendationsForReview(qaItems),
           }

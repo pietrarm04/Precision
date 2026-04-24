@@ -188,11 +188,15 @@ export interface AnalysisResult {
     totalItems: number;
     realFailures: number;
     nonFailures: number;
+    conformingAnswers: number;
     notApplicable: number;
     undetermined: number;
+    ics: number;
     sourceScore?: SourceScoreSummary;
     bySection: Array<{ section: string; total: number }>;
+    failuresBySection: Array<{ section: string; total: number }>;
     topFailedQuestions: Array<{ question: string; total: number }>;
+    failuresByQuestion: Array<{ question: string; total: number }>;
     weightedIssues: WeightedIssue[];
     ambiguousQuestions: ManualQuestionOverride[];
   };
