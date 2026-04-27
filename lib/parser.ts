@@ -1,10 +1,40 @@
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { ParsedTabularFile, RowMap } from "@/lib/types";
-import { normalizeHeader, toStringValue } from "@/lib/utils";
+import { toStringValue } from "@/lib/utils";
 
 const MAX_ROWS = 50_000;
 const HEADER_SCAN_LIMIT = 18;
+const INSPECTION_PREFIX_TYPO_REGEX = /^\s*inspecti\s+n[\s_-]*/i;
+const INSPECTION_PREFIX_REGEX = /^\s*inspection[\s_-]*/i;
+
+function normalizeInternalKey(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[?]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function normalizeSafetyCultureHeaderRaw(header: string): string {
+  let fixed = toStringValue(header).replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
+  if (INSPECTION_PREFIX_TYPO_REGEX.test(fixed)) {
+    fixed = fixed.replace(INSPECTION_PREFIX_TYPO_REGEX, "inspection_");
+  } else if (INSPECTION_PREFIX_REGEX.test(fixed)) {
+    fixed = fixed.replace(INSPECTION_PREFIX_REGEX, "inspection_");
+  }
+  return fixed;
+}
+
+function normalizeSafetyCultureHeaderKey(header: string, index: number): string {
+  const raw = normalizeSafetyCultureHeaderRaw(header);
+  const normalized = normalizeInternalKey(raw);
+  return normalized || `coluna_${index + 1}`;
+}
 
 function matrixFromCsv(buffer: Buffer): { matrix: string[][]; warnings: string[]; errors: string[] } {
   const csv = buffer.toString("utf-8");
@@ -87,7 +117,13 @@ function prepareRows(matrix: string[][], headerIndex: number): { headers: string
     ...dataRows.slice(0, 1000).map((row) => row.length),
   );
   const rawHeaders = new Array(maxColumns).fill(null).map((_, index) => matrix[headerIndex]?.[index] ?? "");
-  const headers = rawHeaders.map((header, index) => normalizeHeader(header, index));
+  const headers = rawHeaders.map((header, index) => normalizeSafetyCultureHeaderKey(header, index));
+  const originalHeadersByNormalized: Record<string, string> = {};
+  headers.forEach((header, index) => {
+    if (!originalHeadersByNormalized[header]) {
+      originalHeadersByNormalized[header] = normalizeSafetyCultureHeaderRaw(rawHeaders[index] ?? "");
+    }
+  });
   const inconsistentRows = dataRows.filter((row) => row.length !== maxColumns).length;
   if (headerIndex > 0) {
     warnings.push(
@@ -108,6 +144,12 @@ function prepareRows(matrix: string[][], headerIndex: number): { headers: string
       return mapped;
     })
     .filter((row) => Object.values(row).some((value) => toStringValue(value).length > 0));
+
+  if (rows.length > 0) {
+    rows.forEach((row) => {
+      row.__originalHeadersByNormalized = originalHeadersByNormalized;
+    });
+  }
 
   return { headers, rows, warnings };
 }
@@ -142,6 +184,7 @@ export function parseTabularFile(fileName: string, bytes: ArrayBuffer): ParsedTa
       fileName,
       extension,
       headers: [],
+      originalHeaders: [],
       rows: [],
       warnings,
       errors: errors.length > 0 ? errors : ["Arquivo vazio ou sem linhas legiveis."],
@@ -165,6 +208,14 @@ export function parseTabularFile(fileName: string, bytes: ArrayBuffer): ParsedTa
     fileName,
     extension,
     headers,
+    originalHeaders: headers.map((header) => {
+      const firstRow = rows[0];
+      if (firstRow && typeof firstRow.__originalHeadersByNormalized === "object") {
+        const lookup = firstRow.__originalHeadersByNormalized as Record<string, string>;
+        return lookup[header] ?? header;
+      }
+      return header;
+    }),
     rows,
     warnings,
     errors,

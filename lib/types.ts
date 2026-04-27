@@ -16,18 +16,55 @@ export interface ParsedTabularFile {
   fileName: string;
   extension: "csv" | "xlsx" | "xls";
   headers: string[];
+  originalHeaders: string[];
   rows: RowMap[];
   warnings: string[];
   errors: string[];
 }
 
+export type NormalizedChecklistAnswer = "sim" | "nao" | "na";
+
+export interface NormalizedChecklistEntry {
+  fileName: string;
+  auditId: string;
+  unitName: string;
+  section: string;
+  question: string;
+  originalColumnName: string;
+  normalizedColumnName: string;
+  originalAnswer: string;
+  normalizedAnswer: NormalizedChecklistAnswer;
+}
+
+export interface ChecklistColumnValidationSummary {
+  totalOriginalColumns: number;
+  totalValidChecklistQuestionColumns: number;
+  totalExcludedNotesColumns: number;
+  totalExcludedMetadataAdminColumns: number;
+  totalExcludedConclusionRiskSignatureColumns: number;
+  totalNormalizedChecklistAnswers: number;
+  validChecklistColumns: string[];
+  normalizedAnswerCounts: {
+    sim: number;
+    nao: number;
+    na: number;
+  };
+  first10ValidChecklistQuestions: string[];
+  first10ExcludedAdminConclusionFields: string[];
+  excludedConclusionFields: string[];
+}
+
 export interface NormalizedDataset {
   headers: string[];
+  originalHeaderByNormalized: Record<string, string>;
+  normalizedHeaderByOriginal: Record<string, string>;
   rows: RowMap[];
   duplicateHeaders: string[];
   removedColumns: string[];
   normalizationNotes: string[];
   rawWarnings: string[];
+  normalizedChecklistEntries: NormalizedChecklistEntry[];
+  checklistValidationSummary: ChecklistColumnValidationSummary;
 }
 
 export interface DatasetTypeInference {
@@ -198,6 +235,22 @@ export interface AnalysisResult {
     failuresByQuestion: Array<{ question: string; total: number }>;
     weightedIssues: WeightedIssue[];
     ambiguousQuestions: ManualQuestionOverride[];
+  };
+  checklistNormalization?: {
+    totalOriginalColumns: number;
+    totalValidChecklistQuestionColumns: number;
+    totalExcludedNotesColumns: number;
+    totalExcludedMetadataAdminColumns: number;
+    totalExcludedConclusionRiskSignatureColumns: number;
+    totalNormalizedChecklistAnswers: number;
+    normalizedAnswerCounts: {
+      sim: number;
+      nao: number;
+      na: number;
+    };
+    first10ValidChecklistQuestions: string[];
+    first10ExcludedAdminConclusionFields: string[];
+    excludedConclusionFields: string[];
   };
   customDashboards?: {
     configApplied: DashboardCustomizationConfig;

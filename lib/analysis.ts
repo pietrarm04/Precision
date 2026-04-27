@@ -9,6 +9,7 @@ import {
   KpiKey,
   ManualReviewConfig,
   NormalizedDataset,
+  NormalizedChecklistAnswer,
   ParsedTabularFile,
   QAItem,
   QAOutcome,
@@ -64,22 +65,6 @@ const statusFailTokens = [
 const naTokens = ["na", "n/a", "não se aplica", "nao se aplica", "not applicable"];
 const yesTokens = ["sim", "yes", "y", "true", "1"];
 const noTokens = ["nao", "não", "no", "n", "false", "0"];
-const inspectionPrefixRegex = /^inspection(?:[_\s-]|$)/i;
-const inspectionNotesSuffixRegex = /(?:_|-)notes?$/i;
-const inspectionIgnoredCoreRegex =
-  /(^|_)(auditid|audit_id|auditname|audit_name|templateid|template_id|templatename|template_name|author|owner|start|completed|lastupdate|last_update|score|totalscore|total_score|classification|classificacao|title_page|titlepage|page_title)(_|$)/i;
-const inspectionConclusionCoreRegex =
-  /(^|_)(dados_do_estabelecimento|observacoes|classificacao_de_risco|nivel_de_risco_sanitario|necessita_acao_imediata|multa|interdicao|classificacao_final)(_|$)/i;
-const checklistAnswerTokens = new Set([
-  "sim",
-  "yes",
-  "nao",
-  "no",
-  "na",
-  "n/a",
-  "nao se aplica",
-  "not applicable",
-]);
 
 const defaultIgnoredRegex = /(coment[aá]rio|evid[eê]ncia|foto|anexo|assinatura|observa[cç][aã]o)/i;
 
@@ -212,53 +197,6 @@ function parseAsOutcome(rawValue: unknown): QAOutcome {
   return "unknown";
 }
 
-function normalizeInspectionHeaderCore(header: string): string {
-  return header.trim().toLowerCase().replace(/^inspection(?:[_\s-]+)?/, "");
-}
-
-function normalizeInspectionKey(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
-
-function normalizeChecklistAnswerToken(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim()
-    .replace(/\s*\/\s*/g, "/")
-    .replace(/\s+/g, " ");
-}
-
-function hasChecklistLikeAnswers(rows: NormalizedDataset["rows"], column: string): boolean {
-  let nonEmptyCount = 0;
-  let recognizedCount = 0;
-  let unknownCount = 0;
-
-  for (const row of rows) {
-    const normalized = normalizeChecklistAnswerToken(toStringValue(row[column]));
-    if (!normalized) {
-      continue;
-    }
-    nonEmptyCount += 1;
-    if (checklistAnswerTokens.has(normalized)) {
-      recognizedCount += 1;
-    } else {
-      unknownCount += 1;
-    }
-  }
-
-  if (nonEmptyCount === 0) {
-    return true;
-  }
-  return recognizedCount >= unknownCount;
-}
-
 function normalizeSectionLabel(rawSection: string): string {
   let section = rawSection
     .toLowerCase()
@@ -270,42 +208,6 @@ function normalizeSectionLabel(rawSection: string): string {
   section = section.replace(/^sanitarios\s+e\s+alojamento.*$/i, "sanitarios");
   section = section.replace(/^sanitario\s+para\s+os?\s+clientes?.*$/i, "sanitario cliente");
   return section || "sem secao";
-}
-
-function isInspectionQuestionColumn(header: string, rows?: NormalizedDataset["rows"]): boolean {
-  if (!inspectionPrefixRegex.test(header)) {
-    return false;
-  }
-  const normalizedCore = normalizeInspectionKey(normalizeInspectionHeaderCore(header));
-  if (!normalizedCore) {
-    return false;
-  }
-  if (inspectionNotesSuffixRegex.test(normalizedCore)) {
-    return false;
-  }
-  if (inspectionIgnoredCoreRegex.test(normalizedCore)) {
-    return false;
-  }
-  if (inspectionConclusionCoreRegex.test(normalizedCore)) {
-    return false;
-  }
-  if (rows && !hasChecklistLikeAnswers(rows, header)) {
-    return false;
-  }
-  return true;
-}
-
-function deriveSectionAndQuestionFromInspectionColumn(header: string): { section: string; question: string } {
-  const core = normalizeInspectionHeaderCore(header);
-  const separatorIndex = core.indexOf("_");
-  const sectionPart = separatorIndex >= 0 ? core.slice(0, separatorIndex) : core;
-  const questionPart = separatorIndex >= 0 ? core.slice(separatorIndex + 1) : core;
-  const toQuestion = (value: string) => value.replace(/_/g, " ").replace(/\s+/g, " ").trim();
-
-  return {
-    section: normalizeSectionLabel(sectionPart),
-    question: toQuestion(questionPart) || "(pergunta nao identificada)",
-  };
 }
 
 function mapWideInspectionSemanticResult(outcome: QAOutcome, responseRaw: string): "real_failure" | "non_failure" | "na" {
@@ -385,43 +287,52 @@ function detectInspectionFields(
   return { questionCol, answerCol, sectionCol, dateCol, unitCol };
 }
 
+function outcomeFromNormalizedChecklistAnswer(answer: NormalizedChecklistAnswer): QAOutcome {
+  if (answer === "sim") return "yes";
+  if (answer === "nao") return "no";
+  return "na";
+}
+
 function buildInspectionItems(
   dataset: NormalizedDataset,
   inference: DatasetTypeInference,
   config: ManualReviewConfig | undefined,
 ): { items: QAItem[]; stats: Record<string, number> } {
   const { questionCol, answerCol, sectionCol, dateCol } = detectInspectionFields(dataset, inference);
-  const inspectionColumns = dataset.headers.filter((header) => isInspectionQuestionColumn(header, dataset.rows));
   const items: QAItem[] = [];
   let ignoredCount = 0;
 
-  if (inspectionColumns.length > 0) {
-    for (const row of dataset.rows) {
-      for (const column of inspectionColumns) {
-        const { section, question } = deriveSectionAndQuestionFromInspectionColumn(column);
-        if (questionIsIgnored(question, config)) {
-          ignoredCount += 1;
-          continue;
-        }
-        const responseRaw = toStringValue(row[column]).trim();
-        const outcome = parseAsOutcome(responseRaw);
-        const semantics = mapWideInspectionSemanticResult(outcome, responseRaw);
-        const criticalOverride = config?.questionOverrides.find((q) => q.questionText === question)?.critical ?? false;
-        const weight = questionWeight(question, section || undefined, config);
-
-        items.push({
-          question,
-          responseRaw,
-          normalizedOutcome: outcome,
-          section,
-          date: dateCol ? toStringValue(row[dateCol]) : undefined,
-          semanticPolarity: "neutral",
-          semanticResult: semantics,
-          critical: criticalOverride,
-          weight,
-          sourceRow: row,
-        });
+  if (dataset.normalizedChecklistEntries.length > 0 || dataset.checklistValidationSummary.totalValidChecklistQuestionColumns >= 0) {
+    for (const entry of dataset.normalizedChecklistEntries) {
+      const section = normalizeSectionLabel(entry.section);
+      const question = entry.question.trim() || "(pergunta nao identificada)";
+      if (questionIsIgnored(question, config)) {
+        ignoredCount += 1;
+        continue;
       }
+
+      const outcome = outcomeFromNormalizedChecklistAnswer(entry.normalizedAnswer);
+      const semantics = mapWideInspectionSemanticResult(outcome, entry.originalAnswer);
+      const criticalOverride = config?.questionOverrides.find((q) => q.questionText === question)?.critical ?? false;
+      const weight = questionWeight(question, section || undefined, config);
+
+      items.push({
+        question,
+        responseRaw: entry.originalAnswer,
+        normalizedOutcome: outcome,
+        section,
+        date: undefined,
+        semanticPolarity: "neutral",
+        semanticResult: semantics,
+        critical: criticalOverride,
+        weight,
+        sourceRow: {
+          originalColumnName: entry.originalColumnName,
+          normalizedColumnName: entry.normalizedColumnName,
+          auditId: entry.auditId,
+          unitName: entry.unitName,
+        },
+      });
     }
     return {
       items,
@@ -2249,6 +2160,7 @@ export function analyzeDataset(
             ambiguousQuestions: buildRecommendationsForReview(qaItems),
           }
         : undefined,
+    checklistNormalization: normalized.checklistValidationSummary,
     customDashboards,
     transparency: {
       normalizationActions: normalized.normalizationNotes,
