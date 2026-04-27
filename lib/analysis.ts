@@ -254,7 +254,7 @@ function hasChecklistLikeAnswers(rows: NormalizedDataset["rows"], column: string
   }
 
   if (nonEmptyCount === 0) {
-    return false;
+    return true;
   }
   return recognizedCount >= unknownCount;
 }
