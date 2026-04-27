@@ -65,8 +65,21 @@ const naTokens = ["na", "n/a", "não se aplica", "nao se aplica", "not applicabl
 const yesTokens = ["sim", "yes", "y", "true", "1"];
 const noTokens = ["nao", "não", "no", "n", "false", "0"];
 const inspectionPrefixRegex = /^inspection(?:[_\s-]|$)/i;
+const inspectionNotesSuffixRegex = /(?:_|-)notes?$/i;
 const inspectionIgnoredCoreRegex =
-  /(^|_)(auditid|audit_id|auditname|audit_name|templateid|template_id|author|owner|start|completed|lastupdate|last_update|score|totalscore|total_score|classification|classificacao|classificação|title_page|titlepage|page_title)(_|$)/i;
+  /(^|_)(auditid|audit_id|auditname|audit_name|templateid|template_id|templatename|template_name|author|owner|start|completed|lastupdate|last_update|score|totalscore|total_score|classification|classificacao|title_page|titlepage|page_title)(_|$)/i;
+const inspectionConclusionCoreRegex =
+  /(^|_)(dados_do_estabelecimento|observacoes|classificacao_de_risco|nivel_de_risco_sanitario|necessita_acao_imediata|multa|interdicao|classificacao_final)(_|$)/i;
+const checklistAnswerTokens = new Set([
+  "sim",
+  "yes",
+  "nao",
+  "no",
+  "na",
+  "n/a",
+  "nao se aplica",
+  "not applicable",
+]);
 
 const defaultIgnoredRegex = /(coment[aá]rio|evid[eê]ncia|foto|anexo|assinatura|observa[cç][aã]o)/i;
 
@@ -203,6 +216,49 @@ function normalizeInspectionHeaderCore(header: string): string {
   return header.trim().toLowerCase().replace(/^inspection(?:[_\s-]+)?/, "");
 }
 
+function normalizeInspectionKey(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function normalizeChecklistAnswerToken(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/\s+/g, " ");
+}
+
+function hasChecklistLikeAnswers(rows: NormalizedDataset["rows"], column: string): boolean {
+  let nonEmptyCount = 0;
+  let recognizedCount = 0;
+  let unknownCount = 0;
+
+  for (const row of rows) {
+    const normalized = normalizeChecklistAnswerToken(toStringValue(row[column]));
+    if (!normalized) {
+      continue;
+    }
+    nonEmptyCount += 1;
+    if (checklistAnswerTokens.has(normalized)) {
+      recognizedCount += 1;
+    } else {
+      unknownCount += 1;
+    }
+  }
+
+  if (nonEmptyCount === 0) {
+    return false;
+  }
+  return recognizedCount >= unknownCount;
+}
+
 function normalizeSectionLabel(rawSection: string): string {
   let section = rawSection
     .toLowerCase()
@@ -216,19 +272,24 @@ function normalizeSectionLabel(rawSection: string): string {
   return section || "sem secao";
 }
 
-function isInspectionQuestionColumn(header: string): boolean {
+function isInspectionQuestionColumn(header: string, rows?: NormalizedDataset["rows"]): boolean {
   if (!inspectionPrefixRegex.test(header)) {
     return false;
   }
-  const core = normalizeInspectionHeaderCore(header);
-  const normalizedCore = core.replace(/[\s-]+/g, "_");
+  const normalizedCore = normalizeInspectionKey(normalizeInspectionHeaderCore(header));
   if (!normalizedCore) {
     return false;
   }
-  if (normalizedCore.endsWith("_note") || normalizedCore.endsWith("_notes")) {
+  if (inspectionNotesSuffixRegex.test(normalizedCore)) {
     return false;
   }
   if (inspectionIgnoredCoreRegex.test(normalizedCore)) {
+    return false;
+  }
+  if (inspectionConclusionCoreRegex.test(normalizedCore)) {
+    return false;
+  }
+  if (rows && !hasChecklistLikeAnswers(rows, header)) {
     return false;
   }
   return true;
@@ -330,7 +391,7 @@ function buildInspectionItems(
   config: ManualReviewConfig | undefined,
 ): { items: QAItem[]; stats: Record<string, number> } {
   const { questionCol, answerCol, sectionCol, dateCol } = detectInspectionFields(dataset, inference);
-  const inspectionColumns = dataset.headers.filter(isInspectionQuestionColumn);
+  const inspectionColumns = dataset.headers.filter((header) => isInspectionQuestionColumn(header, dataset.rows));
   const items: QAItem[] = [];
   let ignoredCount = 0;
 
