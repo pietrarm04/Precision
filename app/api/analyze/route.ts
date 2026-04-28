@@ -76,13 +76,13 @@ const dashboardConfigSchema = z.object({
   okrs: z
     .array(
       z.object({
-        objectiveTitle: z.string().min(1),
+        objectiveTitle: z.string().trim().min(1).catch("Objetivo sem titulo"),
         keyResults: z
           .array(
             z.object({
-              title: z.string().min(1),
-              currentValue: z.number(),
-              targetValue: z.number(),
+              title: z.string().trim().min(1).catch("KR sem titulo"),
+              currentValue: z.coerce.number().catch(0),
+              targetValue: z.coerce.number().catch(1),
             }),
           )
           .default([]),
@@ -95,8 +95,8 @@ const requestSchema = z.object({
   fileName: z.string().min(3),
   fileBase64: z.string().min(8),
   mode: z.enum(["quick", "reviewed"]).default("quick"),
-  rules: reviewSchema.optional(),
-  dashboardConfig: dashboardConfigSchema.optional(),
+  rules: z.unknown().optional(),
+  dashboardConfig: z.unknown().optional(),
   debugMode: z.boolean().optional(),
 });
 
@@ -123,6 +123,65 @@ function boolFromUnknown(value: unknown): boolean | undefined {
   return undefined;
 }
 
+function parseOptionalRules(raw: unknown): z.infer<typeof reviewSchema> | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = reviewSchema.safeParse(raw);
+  if (parsed.success) {
+    return parsed.data;
+  }
+  appendDebugLog({
+    hypothesisId: "E",
+    location: "app/api/analyze/route.ts:parseOptionalRules",
+    message: "Ignoring invalid manual rules payload.",
+    data: {
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        code: issue.code,
+        message: issue.message,
+      })),
+    },
+    timestamp: Date.now(),
+  });
+  return undefined;
+}
+
+function parseOptionalDashboardConfig(raw: unknown): DashboardCustomizationConfig | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = dashboardConfigSchema.safeParse(raw);
+  if (parsed.success) {
+    return parsed.data as DashboardCustomizationConfig;
+  }
+  appendDebugLog({
+    hypothesisId: "E",
+    location: "app/api/analyze/route.ts:parseOptionalDashboardConfig",
+    message: "Ignoring invalid dashboard customization payload.",
+    data: {
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        code: issue.code,
+        message: issue.message,
+      })),
+    },
+    timestamp: Date.now(),
+  });
+  return undefined;
+}
+
+function parseJsonField(raw: FormDataEntryValue | null): unknown {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
 async function analyzeSingleFile(args: {
   fileName: string;
   fileBytes: ArrayBuffer;
@@ -146,6 +205,8 @@ export async function POST(request: Request) {
     if (!contentType.toLowerCase().includes("multipart/form-data")) {
       const raw = await request.json();
       const payload = requestSchema.parse(raw);
+      const rules = parseOptionalRules(payload.rules);
+      const dashboardConfig = parseOptionalDashboardConfig(payload.dashboardConfig);
       if (!isSupportedExtension(payload.fileName)) {
         return NextResponse.json(
           {
@@ -175,20 +236,19 @@ export async function POST(request: Request) {
         data: {
           mode: payload.mode,
           fileName: payload.fileName,
-          hasRules: Boolean(payload.rules),
-          hasDashboardConfig: Boolean(payload.dashboardConfig),
-          okrCount: payload.dashboardConfig?.okrs.length ?? 0,
+          hasRules: Boolean(rules),
+          hasDashboardConfig: Boolean(dashboardConfig),
+          okrCount: dashboardConfig?.okrs?.length ?? 0,
           base64Length: payload.fileBase64.length,
         },
         timestamp: Date.now(),
       });
       // #endregion
-      const dashboardConfig = payload.dashboardConfig as DashboardCustomizationConfig | undefined;
       const result = await analyzeSingleFile({
         fileName: payload.fileName,
         fileBytes: toArrayBuffer(fileBuffer),
         mode: payload.mode,
-        rules: payload.rules,
+        rules,
         dashboardConfig,
         debugMode: payload.debugMode,
       });
@@ -197,17 +257,11 @@ export async function POST(request: Request) {
 
     const formData = await request.formData();
     const mode = z.enum(["quick", "reviewed"]).parse(String(formData.get("mode") ?? "quick"));
-    const rulesRaw = formData.get("rules");
-    const dashboardConfigRaw = formData.get("dashboardConfig");
+    const rulesRaw = parseJsonField(formData.get("rules"));
+    const dashboardConfigRaw = parseJsonField(formData.get("dashboardConfig"));
     const debugModeRaw = formData.get("debugMode");
-    const rules =
-      typeof rulesRaw === "string" && rulesRaw.trim().length > 0
-        ? reviewSchema.parse(JSON.parse(rulesRaw))
-        : undefined;
-    const dashboardConfig =
-      typeof dashboardConfigRaw === "string" && dashboardConfigRaw.trim().length > 0
-        ? (dashboardConfigSchema.parse(JSON.parse(dashboardConfigRaw)) as DashboardCustomizationConfig)
-        : undefined;
+    const rules = parseOptionalRules(rulesRaw);
+    const dashboardConfig = parseOptionalDashboardConfig(dashboardConfigRaw);
     const debugMode = boolFromUnknown(debugModeRaw);
 
     const allFiles = formData.getAll("files").filter((entry): entry is File => entry instanceof File);
