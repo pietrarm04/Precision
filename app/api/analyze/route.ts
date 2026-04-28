@@ -238,7 +238,7 @@ export async function POST(request: Request) {
           fileName: payload.fileName,
           hasRules: Boolean(rules),
           hasDashboardConfig: Boolean(dashboardConfig),
-          okrCount: dashboardConfig?.okrs.length ?? 0,
+          okrCount: dashboardConfig?.okrs?.length ?? 0,
           base64Length: payload.fileBase64.length,
         },
         timestamp: Date.now(),
