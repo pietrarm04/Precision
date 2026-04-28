@@ -721,7 +721,6 @@ export default function HomePage() {
             className="btn"
             onClick={() => {
               const mode = quickMode ? "quick" : "reviewed";
-              const derivedDisabled = selectedFiles.length === 0;
               const clickMessage = `Clique em Processar às ${new Date().toLocaleTimeString("pt-BR")} com ${selectedFiles.length} arquivo(s).`;
               console.log(clickMessage);
               setSubmitDebugMessage(clickMessage);
@@ -734,17 +733,14 @@ export default function HomePage() {
                   mode,
                   selectedFileCount: selectedFiles.length,
                   loading,
-                  derivedDisabled,
+                  derivedDisabled: selectedFiles.length === 0,
                 },
                 timestamp: Date.now(),
               });
               // #endregion
-              if (derivedDisabled) {
-                return;
-              }
               void runAnalysis(mode, quickMode ? undefined : rules ?? undefined);
             }}
-            disabled={selectedFiles.length === 0}
+            disabled={loading}
           >
             {loading ? "Processando arquivos..." : "Processar arquivo(s)"}
           </button>
