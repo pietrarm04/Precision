@@ -131,14 +131,12 @@ export default function HomePage() {
   const [sampleFiles, setSampleFiles] = useState<string[]>([]);
   const [selectedSample, setSelectedSample] = useState<string>("");
   const [sampleLoading, setSampleLoading] = useState(false);
-  const [processingProgress, setProcessingProgress] = useState<{ current: number; total: number } | null>(
-    null,
-  );
   const [dashboardConfig, setDashboardConfig] = useState<DashboardCustomizationConfig>(
     createDefaultDashboardConfig(),
   );
 
   const hasAnyUploadedFile = uploadedUnits.length > 0;
+  const selectedFiles = uploadedUnits;
 
   const fileInfo = useMemo(() => {
     if (uploadedUnits.length === 0) {
@@ -180,10 +178,7 @@ export default function HomePage() {
     setError(null);
     setDebugJson(null);
     try {
-      const total = uploadedUnits.length;
-      setProcessingProgress({ current: 0, total });
       const batch = await runBatchAnalysis(uploadedUnits, mode, reviewRules);
-      setProcessingProgress({ current: total, total });
       const unitResults = batch.results.map((item) => ({
         unitId: item.unitId ?? `${item.fileName}-${item.unit}`,
         fileName: item.fileName,
@@ -239,7 +234,6 @@ export default function HomePage() {
       );
     } finally {
       setLoading(false);
-      setProcessingProgress(null);
     }
   }
 
@@ -313,6 +307,7 @@ export default function HomePage() {
       formData.append("unitLabels", input.unitLabel.trim());
       formData.append("unitIds", input.id);
     });
+    console.log("CALLING /api/analyze");
     const response = await fetch("/api/analyze", {
       method: "POST",
       body: formData,
@@ -322,6 +317,15 @@ export default function HomePage() {
       throw new Error(data.error ?? data.message ?? "Erro ao processar arquivos.");
     }
     return { results: data.results, errors: data.errors };
+  }
+
+  function handleProcessButtonClick() {
+    console.log("PROCESS BUTTON CLICKED", selectedFiles.length);
+    if (selectedFiles.length === 0 || loading) {
+      return;
+    }
+    const mode = quickMode ? "quick" : "reviewed";
+    void runAnalysis(mode, quickMode ? undefined : rules ?? undefined);
   }
 
   async function loadSampleFile() {
@@ -1061,40 +1065,15 @@ export default function HomePage() {
           <button
             type="button"
             className="btn"
-            onClick={() => {
-              const mode = quickMode ? "quick" : "reviewed";
-              const derivedDisabled = !hasAnyUploadedFile || loading;
-              const timestamp = performance.now();
-              // #region agent log
-              appendClientDebugLog({
-                hypothesisId: "D",
-                location: "app/page.tsx:process-button-onClick",
-                message: "Process button click received",
-                data: {
-                  mode,
-                  selectedCount: uploadedUnits.length,
-                  processableCount: uploadedUnits.length,
-                  loading,
-                  derivedDisabled,
-                },
-                timestamp,
-              });
-              // #endregion
-              if (derivedDisabled) {
-                return;
-              }
-              void runAnalysis(mode, quickMode ? undefined : rules ?? undefined);
-            }}
-            disabled={!hasAnyUploadedFile || loading}
+            onClick={handleProcessButtonClick}
+            disabled={selectedFiles.length === 0 || loading}
           >
-            {loading
-              ? `Processando ${processingProgress?.current ?? 0} de ${processingProgress?.total ?? uploadedUnits.length} arquivos...`
-              : "Processar arquivos"}
+            {loading ? "Processando arquivos..." : "Processar arquivo(s)"}
           </button>
         </div>
         {loading && (
           <div className="pill">
-            Processando {processingProgress?.current ?? 0} de {processingProgress?.total ?? uploadedUnits.length} arquivos...
+            Processando arquivos...
           </div>
         )}
         {error && (
